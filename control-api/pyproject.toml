@@ -1,0 +1,14 @@
+[project]
+name = "shlb-control-api"
+version = "0.2.0"
+description = "Phase 2 domain and API foundation for Self Healing Load Balancer"
+requires-python = ">=3.13,<3.14"
+
+[tool.pytest.ini_options]
+addopts = "-q"
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py313"

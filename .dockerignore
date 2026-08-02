@@ -1,0 +1,12 @@
+.DS_Store
+.git
+**/__pycache__
+**/*.py[cod]
+control-worker
+docs
+scripts
+.secrets
+frontend/node_modules
+frontend/.next
+frontend/out
+frontend/npm-debug.log*
