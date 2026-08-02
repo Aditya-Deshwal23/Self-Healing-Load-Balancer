@@ -1,101 +1,218 @@
 # Self Healing Load Balancer
 
-Self Healing Load Balancer is a local traffic-reliability control-plane laboratory and operator console. Its Phase 1 data plane proves that one physical backend can participate in several logical HAProxy route pools and that Runtime operations can target one route membership without changing its siblings. Phase 2 adds the authenticated domain, persistence, API, audit, and event foundations without giving the API any traffic-control authority.
+This repository is a compact local-network prototype of Evidence-Bounded Minimum-Scope Healing (EBMSH). It demonstrates a deliberately narrow claim: when checkout fails only on one physical backend, the controller can prove the scope, quarantine only that route membership in HAProxy, verify both symptom relief and unaffected-route preservation, then restore traffic through evidence-gated stages.
 
-The research mechanism remains Evidence-Bounded Minimum-Scope Healing (EBMSH). HAProxy health checks and Runtime weight/state operations are enabling mechanisms, not the claimed innovation.
+The flagship path is real. It uses generated traffic, backend request metrics, direct probes, PostgreSQL records, a sole-writer worker, HAProxy Runtime commands and Runtime readback. ML, Elasticsearch, Kibana, Ollama and LLM-generated recommendations are not part of the working prototype.
+
+## Start the local LAB
+
+Prerequisites are Docker Desktop, OpenSSL, and a Mac or Linux host on the target LAN.
+
+```sh
+./local-up
+```
+
+The command safely creates ignored local secrets, detects the current LAN IPv4 address, generates a 30-day development certificate, builds the compact Compose profile, waits for semantic health, and prints the HTTPS URL. Only NGINX publishes host ports:
+
+- `0.0.0.0:8080` redirects to HTTPS;
+- `0.0.0.0:8443` serves the console, REST/SSE API and demo application traffic.
+
+Sign in as `researcher@shlb.local`. The generated password is stored at `.secrets/bootstrap_password` and is intentionally never printed by the lifecycle scripts.
+
+Useful lifecycle commands:
+
+```sh
+./local-status             # service health, LAN URL and published ports
+./local-smoke              # complete checkout/B healing and recovery journey
+./local-down               # stop containers; retain volumes and certificate
+./local-reset              # remove only this Compose project's volumes, then rebuild
+./local-cert-regenerate    # regenerate for the current LAN address and reload NGINX
+```
+
+If automatic address detection is unsuitable, provide an address without committing it:
+
+```sh
+SHLB_LAN_IP=192.168.1.25 ./local-up
+```
+
+The ignored `.env` then supplies the matching allowed Origins to the API. Browser REST and SSE requests use same-origin relative `/api/...` paths; no browser bundle contains a localhost API base URL.
+
+## Certificate use on the LAN
+
+The certificate contains SAN entries for `localhost`, `edge-nginx`, `127.0.0.1`, and the selected LAN IPv4 address. It is self-signed and intended only for this local LAB.
+
+For a quick demonstration, open the printed `https://<LAN-IP>:8443` address and accept the browser's development-certificate warning. For a warning-free device, transfer only `.local-certs/lab.crt`—never `lab.key`—to that device and trust it for local TLS:
+
+- macOS: add the certificate in Keychain Access and set its trust policy for this LAB;
+- iOS/iPadOS: install the profile, then enable trust under Settings → General → About → Certificate Trust Settings;
+- Android/Windows: import it into the user trusted-certificate store following the device's local-certificate procedure.
+
+Regenerate after a DHCP address change. Never distribute or commit the private key.
+
+## Flagship operator journey
+
+1. Open **Lab** and select **Checkout fails on Backend B**.
+2. The authenticated mutation is accepted only in the LAB environment for a Researcher, Project Admin or System Admin and requires the session CSRF token plus an idempotency key.
+3. The worker applies independent, auto-expiring ground truth to the private Backend B fault endpoint.
+4. Real request outcomes and direct probes establish:
+   - `checkout × inst-b` is failing;
+   - checkout on A and C is healthy;
+   - public, auth and catalog on B are healthy;
+   - B is reachable, so the scope is not instance-wide;
+   - remaining physical capacity and peer queues pass policy.
+5. PostgreSQL receives an incident, observation window, fingerprint, deterministic classification, evidence certificate and candidate actions/rejection reasons.
+6. The worker commits a `PREPARED` action and desired state before sending absolute HAProxy Runtime operations for `be_checkout/srv_inst_b`.
+7. Runtime readback must confirm drain/weight zero and unchanged B siblings before the action can enter verification.
+8. Verification requires real checkout samples, low checkout error rate, healthy B siblings, safe peer queues and aligned desired/observed state. Zero samples are never success.
+9. Clearing the fault starts `PROBING → 5% → 20% → 50% → 100% → HEALTHY`. Every transition is sample-, probe- and readback-gated.
+10. REST polling and a single environment SSE connection update the console throughout the lifecycle.
+
+Run the same journey without the UI:
+
+```sh
+./local-smoke
+```
+
+Additional deterministic safety coverage is available with:
+
+```sh
+python3 scripts/test_safety_scenarios.py
+```
+
+It proves that conflicting `UNKNOWN` and shared-checkout failures create no destructive action, while a supported `INSTANCE_DOWN` drains exactly B's four memberships after counting B's physical capacity once.
+
+## Architecture and authority
+
+The request path is independent of the control plane:
+
+```text
+LAN client
+  → NGINX :8443
+    → HAProxy :8080
+      → be_public | be_auth | be_catalog | be_checkout
+        → inst-a | inst-b | inst-c
+```
+
+The control path is separate:
+
+```text
+traffic + probes + HAProxy Runtime readback
+  → sole-writer rules worker
+    → PostgreSQL durable records
+    → HAProxy Runtime absolute mutation
+    → Runtime readback
+    → verification / rollback / reintegration
+    → PostgreSQL outbox → Redis stream → authorized SSE
+```
+
+Network boundaries are intentional:
+
+- `edge-nginx` is the only service with published ports;
+- `control-api` joins `api_edge_net` and `control_data_net`, but has no data-plane, observability, backend, or Runtime access;
+- NGINX alone bridges `api_edge_net` to `data_edge_net`; containers on those networks cannot route through it;
+- `control-worker` alone joins the private backend/observability networks and mounts the Runtime socket;
+- Prometheus, PostgreSQL, Redis, HAProxy stats, the Runtime socket and backend management/fault paths are not published;
+- the structural HAProxy Data Plane API is not started in this Runtime-only prototype;
+- PostgreSQL is durable truth; Redis is coordination, session and event-stream infrastructure only;
+- a PostgreSQL advisory lock and a bounded Redis lease prevent two workers from holding write authority;
+- all automatic targets are predeclared HAProxy backend/server objects. Structural reconfiguration is not automated.
+
+Default memory limits total roughly 2.1 GiB across the eleven containers. Prometheus retention is capped at two hours/256 MB, JSON logs rotate, the worker is single-threaded and non-overlapping, database pools and probe/request timeouts are bounded, and the traffic source is capped at 40 requests per second.
+
+## Durable operational model
+
+Alembic migration `20260802_0002_vertical_slice.py` adds:
+
+- incidents, observation windows, fingerprints and classifications;
+- evidence certificates and desired route states;
+- actions, action attempts and observed-state snapshots;
+- verification results;
+- reintegration runs and stages;
+- LAB faults and controller generations.
+
+An action stores its generation, exact target, previous desired/observed state, requested absolute state, expected effect, preservation set, verification obligations, rollback plan, expiry and attempt sequence before mutation. A lost acknowledgment is reconciled through readback and is never blindly retried. An ambiguous result enters `RESULT_UNKNOWN`/`NEEDS_REVIEW`.
+
+## Real API surface
+
+Authenticated reads include:
+
+- `GET /api/v1/system/status`
+- `GET /api/v1/system/capabilities`
+- `GET /api/v1/environments/{id}/operational-summary`
+- `GET /api/v1/environments/{id}/matrix`
+- `GET /api/v1/environments/{id}/incidents`
+- `GET /api/v1/incidents/{id}`
+- `GET /api/v1/incidents/{id}/decision-trace`
+- `GET /api/v1/environments/{id}/actions`
+- `GET /api/v1/actions/{id}`
+- `GET /api/v1/environments/{id}/reintegration`
+- `GET /api/v1/reintegration/{id}`
+- `GET /api/v1/environments/{id}/lab/faults`
+- `GET /api/v1/environments/{id}/worker/status`
+- `GET /api/v1/events`
+
+LAB fault create/clear mutations require authentication, an authorized role, CSRF, an allowed Origin and an idempotency key; clear also requires `If-Match`. Errors use `application/problem+json`, writes create structured audit/outbox records, and project-scope denials intentionally look like `404`.
+
+SSE publishes incident, classification, action, verification, reintegration, rollback, resolution, safe-mode and drift transitions. `Last-Event-ID` is mapped through bounded Redis cursor keys; an expired cursor produces `resync_required` so the client can refetch authorized REST state.
+
+## Operator console
+
+The primary rail has seven destinations: Overview, Traffic, Incidents, Actions, Recovery, Lab and System. Existing contextual export routes are preserved, but unsupported Phase-2 pages are capability-gated and do not compete with the working workflow.
+
+Ordinary LAB mode uses real REST/SSE data for:
+
+- Command Center;
+- route × instance matrix;
+- incidents and Decision Trace;
+- actions and attempts;
+- recovery/reintegration;
+- Fault Lab;
+- system status.
+
+The old bounded design snapshot remains available only with `/app?demo=1`. It displays a persistent **Simulated data** notice and has no HAProxy authority. Live API failure never silently falls back to fixtures.
+
+The matrix uses a desired-state outer boundary and an observed-state interior, has an explicit drift pattern, supports roving arrow-key navigation, includes a semantic table/cell description, and opens a focus-managed detail dialog. Mobile is intentionally read-only for the critical incident surface; fault injection and routing controls are hidden or disabled.
+
+## Verification commands
+
+```sh
+# Frontend strict check, contracts, production export and internal links
+cd frontend && npm run verify
+
+# API, persistence and deterministic worker-policy tests in the running image
+docker compose exec -T control-api pytest -q
+
+# Migration has no pending model changes
+docker compose exec -T control-api alembic check
+
+# Real HAProxy route-isolation invariant
+python3 scripts/test_phase1_isolation.py
+
+# Flagship and safety journeys
+./local-smoke
+python3 scripts/test_safety_scenarios.py
+
+# Auth/RBAC/CSRF/idempotency/SSE/network boundaries and restart recovery
+python3 scripts/test_phase2_foundation.py
+python3 scripts/test_worker_restart.py
+```
+
+The OpenAPI document is at `/api/v1/openapi.json`, with local interactive documentation at `/api/v1/docs`.
 
 ## Repository layout
 
 ```text
-.
-├── FRONTEND_UX_DESIGN.md          # Operator-console design contract; precedes UI code
-├── control-api/                   # FastAPI REST/SSE role; PostgreSQL/Redis, no actuator access
-│   ├── alembic/                   # Forward/reverse domain migrations
-│   ├── src/shlb_api/              # Identity, registry, RBAC, audit, idempotency, SSE
-│   └── tests/                     # Contract and PostgreSQL constraint checks
-├── control-worker/                # Future sole-writer worker process role
-│   └── src/
-├── demo-backend/                  # Deterministic black-box laboratory target image
-├── docs/design/                   # Frozen 21-part architecture dossier
-├── frontend/                      # Next.js/TypeScript operator console (static export)
-│   ├── app/                       # Public and authenticated route trees
-│   ├── components/                # Console shell and operational views
-│   └── lib/                       # Typed contracts, fixtures, and route inventory
-├── haproxy/
-│   ├── Dockerfile                 # HAProxy 3.2 LTS image plus Runtime test client
-│   ├── dataplaneapi.yml           # Data Plane API bound only to control_net
-│   └── haproxy.cfg                # Four route pools × three physical instances
-├── nginx/
-│   ├── Dockerfile                 # Builds the console, then creates the TLS edge image
-│   ├── nginx.conf                 # UI, /api, and application routing
-│   └── 40-generate-lab-cert.sh    # Ephemeral self-signed lab certificate
-├── scripts/
-│   ├── init_phase2_secrets.sh     # Idempotent local secret bootstrap; prints no values
-│   ├── test_phase1_isolation.py   # Read/write/readback/restore Runtime test
-│   └── test_phase2_foundation.py  # Auth/RBAC/API/SSE/persistence/isolation test
-└── docker-compose.yml             # Isolated edge, backend, control, and data networks
+control-api/       FastAPI API plus the separately launched sole-writer worker
+demo-backend/      deterministic application, bounded metrics and private fault surface
+frontend/          statically exported Next.js/React operator console
+haproxy/           four logical pools × three predeclared physical instances
+nginx/             sole published TLS edge and static console server
+prometheus/        compact bounded evidence profile
+traffic-generator/ bounded real evidence source
+scripts/           secrets, lifecycle acceptance and isolation checks
+docs/design/       frozen architecture/specification dossier
 ```
 
-`control-api` and `control-worker` are two process roles of one Python modular monolith, not independent domain microservices. Only the API role exists in Phase 2. The future sole-writer worker remains absent.
+## Explicit limits
 
-## Run the Phase 2 foundation
-
-```sh
-./scripts/init_phase2_secrets.sh
-docker compose up --build -d
-./scripts/test_phase2_foundation.py
-python3 scripts/test_phase1_isolation.py
-```
-
-The edge is available at `https://localhost:8443`. The generated certificate is self-signed and intended only for this isolated local lab. HTTP on port `8080` redirects to TLS.
-
-The root serves the product landing page. Sign-in is at `/login`; the authenticated operator console is at `/app`. The bootstrap account is `admin@shlb.local`, with its generated local password stored in `.secrets/bootstrap_password`. The labelled fixture tour remains available at `/app?demo=1`. The original static-delivery diagnostic purpose is preserved at `/diagnostics/phase-1`.
-
-The versioned OpenAPI document is available at `https://localhost:8443/api/v1/openapi.json`, with interactive local documentation at `/api/v1/docs`.
-
-Sample black-box requests:
-
-```sh
-curl --insecure https://localhost:8443/public
-curl --insecure https://localhost:8443/auth
-curl --insecure https://localhost:8443/catalog
-curl --insecure https://localhost:8443/checkout
-```
-
-The test changes only `be_checkout/srv_inst_b`, confirms the three other B memberships are byte-for-byte unchanged across the stable Runtime control fields, and restores the original weight in a `finally` path.
-
-## Frontend development
-
-```sh
-cd frontend
-npm install
-npm run verify
-npm run dev
-```
-
-The console is light-first, supports light/dark/system themes, and statically exports all public and console routes. Phase 2 connects server-side sessions, environment/capability status, and SSE connection state. Traffic telemetry, incident/action lifecycles, HAProxy observed state, and healing remain explicit typed fixtures. Write controls cannot claim or perform a routing change.
-
-## Phase 2 boundaries
-
-- No target-side SDK, JavaScript, tracking tag, or application modification is required or modeled.
-- Data Plane API is reachable only on the internal `control_net`; it is not published to the host.
-- The Runtime Unix socket is not published over TCP.
-- PostgreSQL and Redis are private to `control_data_net` and have no host-published ports.
-- The API joins `edge_net` and `control_data_net`, but not `control_net` or `backend_net`.
-- The API has no HAProxy credential, Runtime socket, Docker socket, host execution path, or routing mutation endpoint.
-- Stored registry intent is returned as desired state. Observed HAProxy state is explicitly `UNKNOWN`.
-- Sessions are opaque Redis records delivered through Secure, HttpOnly, SameSite=Strict cookies; mutating requests also require a session-bound CSRF token and allowed Origin.
-- Project scope denial is intentionally returned as `404`; creates are idempotent; mutable entities require `If-Match`; audit records are append-only and events use a PostgreSQL outbox before Redis/SSE publication.
-- The validated traffic pair is HAProxy `3.2.21` with its bundled Data Plane API `3.2.13`. Base images are pinned by implementation-time tag and resolved multi-architecture digest.
-
-## Verification
-
-```sh
-docker compose run --rm --no-deps \
-  -v "$PWD/control-api/tests:/app/tests:ro" \
-  --entrypoint pytest control-api -q -p no:cacheprovider /app/tests
-docker compose exec -T control-api alembic check
-./scripts/test_phase2_foundation.py
-python3 scripts/test_phase1_isolation.py
-cd frontend && npm run verify
-```
+The current prototype genuinely supports `HEALTHY`, `INSTANCE_DOWN`, `ROUTE_INSTANCE_FAILURE`, `SHARED_ROUTE_FAILURE` and `UNKNOWN` with deterministic rules. Statistical instance degradation, traffic overload control, version-specific classification, ML, ELK, local LLM assistance, multi-node HA, production autoscaling and the full research protocol remain planned and are labelled as unsupported rather than simulated as live capability.

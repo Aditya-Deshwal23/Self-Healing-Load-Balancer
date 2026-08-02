@@ -9,6 +9,7 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -343,4 +344,263 @@ class IdempotencyRecord(Base):
     __table_args__ = (
         UniqueConstraint("actor_user_id", "scope", "key_hash", name="uq_idempotency_actor_scope_key"),
         Index("ix_idempotency_expiry", "expires_at"),
+    )
+
+
+class Incident(Base, TimestampMixin, VersionMixin):
+    __tablename__ = "incidents"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    environment_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("environments.id", ondelete="CASCADE"), nullable=False)
+    route_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("route_groups.id", ondelete="RESTRICT"))
+    instance_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("backend_instances.id", ondelete="RESTRICT"))
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    severity: Mapped[str] = mapped_column(String(16), nullable=False)
+    operational_class: Mapped[str] = mapped_column(String(48), nullable=False)
+    fingerprint_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    summary: Mapped[str] = mapped_column(String(500), nullable=False)
+    opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        CheckConstraint("status IN ('OPEN','MITIGATING','VERIFYING','RECOVERING','NEEDS_REVIEW','RESOLVED')", name="ck_incident_status"),
+        CheckConstraint("severity IN ('INFO','WARNING','CRITICAL')", name="ck_incident_severity"),
+        Index("ix_incidents_environment_status", "environment_id", "status", "opened_at"),
+    )
+
+
+class ObservationWindow(Base, TimestampMixin):
+    __tablename__ = "observation_windows"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    environment_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("environments.id", ondelete="CASCADE"), nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    ended_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    completeness: Mapped[float] = mapped_column(Float, nullable=False)
+    metrics: Mapped[dict] = mapped_column(JSON, nullable=False)
+    probes: Mapped[dict] = mapped_column(JSON, nullable=False)
+    freshness: Mapped[dict] = mapped_column(JSON, nullable=False)
+    conflicts: Mapped[list] = mapped_column(JSON, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint("completeness >= 0 AND completeness <= 1", name="ck_observation_completeness"),
+        Index("ix_observation_environment_end", "environment_id", "ended_at"),
+    )
+
+
+class Fingerprint(Base, TimestampMixin):
+    __tablename__ = "fingerprints"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    incident_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("incidents.id", ondelete="CASCADE"), nullable=False)
+    schema_version: Mapped[str] = mapped_column(String(24), nullable=False)
+    canonical_value: Mapped[str] = mapped_column(Text, nullable=False)
+    fingerprint_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    __table_args__ = (Index("ix_fingerprints_incident", "incident_id", "created_at"),)
+
+
+class Classification(Base, TimestampMixin):
+    __tablename__ = "classifications"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    incident_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("incidents.id", ondelete="CASCADE"), nullable=False)
+    observation_window_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("observation_windows.id", ondelete="RESTRICT"), nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    final_class: Mapped[str] = mapped_column(String(48), nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    completeness: Mapped[float] = mapped_column(Float, nullable=False)
+    evidence_support: Mapped[dict] = mapped_column(JSON, nullable=False)
+    competing_hypotheses: Mapped[list] = mapped_column(JSON, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("incident_id", "revision", name="uq_classification_incident_revision"),
+        CheckConstraint("confidence >= 0 AND confidence <= 1", name="ck_classification_confidence"),
+        CheckConstraint("completeness >= 0 AND completeness <= 1", name="ck_classification_completeness"),
+    )
+
+
+class EvidenceCertificate(Base, TimestampMixin):
+    __tablename__ = "evidence_certificates"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    incident_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("incidents.id", ondelete="CASCADE"), nullable=False)
+    observation_window_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("observation_windows.id", ondelete="RESTRICT"), nullable=False)
+    fingerprint_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("fingerprints.id", ondelete="RESTRICT"), nullable=False)
+    classification_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("classifications.id", ondelete="RESTRICT"), nullable=False)
+    certificate_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    scope_evidence: Mapped[dict] = mapped_column(JSON, nullable=False)
+    safety_inputs: Mapped[dict] = mapped_column(JSON, nullable=False)
+    candidate_actions: Mapped[list] = mapped_column(JSON, nullable=False)
+
+
+class DesiredRouteState(Base, TimestampMixin, VersionMixin):
+    __tablename__ = "desired_route_states"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    environment_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("environments.id", ondelete="CASCADE"), nullable=False)
+    membership_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("route_memberships.id", ondelete="CASCADE"), nullable=False)
+    admin_state: Mapped[str] = mapped_column(String(24), nullable=False)
+    weight: Mapped[int] = mapped_column(Integer, nullable=False)
+    controller_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    source_action_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+
+    __table_args__ = (
+        UniqueConstraint("membership_id", name="uq_desired_route_membership"),
+        CheckConstraint("weight BETWEEN 0 AND 256", name="ck_desired_route_weight"),
+    )
+
+
+class Action(Base, TimestampMixin, VersionMixin):
+    __tablename__ = "actions"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    environment_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("environments.id", ondelete="CASCADE"), nullable=False)
+    incident_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("incidents.id", ondelete="RESTRICT"), nullable=False)
+    evidence_certificate_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("evidence_certificates.id", ondelete="RESTRICT"), nullable=False)
+    membership_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("route_memberships.id", ondelete="RESTRICT"), nullable=False)
+    action_kind: Mapped[str] = mapped_column(String(48), nullable=False)
+    lifecycle: Mapped[str] = mapped_column(String(32), nullable=False)
+    controller_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    haproxy_backend: Mapped[str] = mapped_column(String(80), nullable=False)
+    haproxy_server: Mapped[str] = mapped_column(String(80), nullable=False)
+    previous_desired: Mapped[dict] = mapped_column(JSON, nullable=False)
+    previous_observed: Mapped[dict] = mapped_column(JSON, nullable=False)
+    requested_state: Mapped[dict] = mapped_column(JSON, nullable=False)
+    expected_effect: Mapped[str] = mapped_column(String(500), nullable=False)
+    preservation_set: Mapped[list] = mapped_column(JSON, nullable=False)
+    verification_criteria: Mapped[dict] = mapped_column(JSON, nullable=False)
+    rollback_strategy: Mapped[dict] = mapped_column(JSON, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(128), unique=True, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    terminal_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (Index("ix_actions_environment_lifecycle", "environment_id", "lifecycle", "created_at"),)
+
+
+class ActionAttempt(Base, TimestampMixin):
+    __tablename__ = "action_attempts"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    action_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("actions.id", ondelete="CASCADE"), nullable=False)
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    operation: Mapped[str] = mapped_column(String(120), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    command_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    issued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    response: Mapped[dict] = mapped_column(JSON, nullable=False)
+    observed_state: Mapped[dict] = mapped_column(JSON, nullable=False)
+    error_code: Mapped[str | None] = mapped_column(String(64))
+
+    __table_args__ = (UniqueConstraint("action_id", "sequence", name="uq_action_attempt_sequence"),)
+
+
+class ObservedStateSnapshot(Base, TimestampMixin):
+    __tablename__ = "observed_state_snapshots"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    environment_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("environments.id", ondelete="CASCADE"), nullable=False)
+    action_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("actions.id", ondelete="SET NULL"))
+    source: Mapped[str] = mapped_column(String(32), nullable=False)
+    process_id: Mapped[str | None] = mapped_column(String(80))
+    config_identifier: Mapped[str | None] = mapped_column(String(120))
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    memberships: Mapped[list] = mapped_column(JSON, nullable=False)
+
+    __table_args__ = (Index("ix_observed_environment_time", "environment_id", "observed_at"),)
+
+
+class VerificationResult(Base, TimestampMixin):
+    __tablename__ = "verification_results"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    action_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("actions.id", ondelete="CASCADE"), nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    result: Mapped[str] = mapped_column(String(32), nullable=False)
+    affected_obligation: Mapped[dict] = mapped_column(JSON, nullable=False)
+    preservation_obligation: Mapped[dict] = mapped_column(JSON, nullable=False)
+    sample_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (UniqueConstraint("action_id", "revision", name="uq_verification_action_revision"),)
+
+
+class ReintegrationRun(Base, TimestampMixin, VersionMixin):
+    __tablename__ = "reintegration_runs"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    environment_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("environments.id", ondelete="CASCADE"), nullable=False)
+    incident_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("incidents.id", ondelete="RESTRICT"), nullable=False)
+    action_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("actions.id", ondelete="RESTRICT"), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    current_stage: Mapped[str] = mapped_column(String(24), nullable=False)
+    last_verified_stage: Mapped[str] = mapped_column(String(24), nullable=False)
+    retry_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    maximum_retries: Mapped[int] = mapped_column(Integer, nullable=False)
+    next_transition_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (Index("ix_reintegration_environment_status", "environment_id", "status"),)
+
+
+class ReintegrationStage(Base, TimestampMixin):
+    __tablename__ = "reintegration_stages"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    run_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("reintegration_runs.id", ondelete="CASCADE"), nullable=False)
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    name: Mapped[str] = mapped_column(String(24), nullable=False)
+    requested_weight: Mapped[int | None] = mapped_column(Integer)
+    observed_weight: Mapped[int | None] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(24), nullable=False)
+    sample_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    minimum_samples: Mapped[int] = mapped_column(Integer, nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    result: Mapped[dict] = mapped_column(JSON, nullable=False)
+
+    __table_args__ = (UniqueConstraint("run_id", "sequence", name="uq_reintegration_stage_sequence"),)
+
+
+class LabFault(Base, TimestampMixin, VersionMixin):
+    __tablename__ = "lab_faults"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    environment_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("environments.id", ondelete="CASCADE"), nullable=False)
+    scenario: Mapped[str] = mapped_column(String(48), nullable=False)
+    target_route: Mapped[str | None] = mapped_column(String(80))
+    target_instance: Mapped[str | None] = mapped_column(String(80))
+    duration_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    requested_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"), nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False)
+    ground_truth_id: Mapped[str] = mapped_column(String(80), unique=True, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cleared_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        CheckConstraint("duration_seconds BETWEEN 5 AND 600", name="ck_lab_fault_duration"),
+        Index("ix_lab_faults_environment_status", "environment_id", "status"),
+    )
+
+
+class ControllerGeneration(Base, TimestampMixin):
+    __tablename__ = "controller_generations"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    environment_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("environments.id", ondelete="CASCADE"), nullable=False)
+    generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    worker_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_heartbeat_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    stopped_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        UniqueConstraint("environment_id", "generation", name="uq_controller_environment_generation"),
+        Index("ix_controller_environment_heartbeat", "environment_id", "last_heartbeat_at"),
     )

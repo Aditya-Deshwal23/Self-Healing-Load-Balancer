@@ -1,4 +1,4 @@
-name: shlb-phase1
+name: shlb-local-prototype
 
 x-demo-backend: &demo-backend
   build:
@@ -10,8 +10,11 @@ x-demo-backend: &demo-backend
     VERSION_ID: demo-v1
   expose:
     - "8080"
+  secrets:
+    - fault_control_token
   networks:
     - backend_net
+    - observability_net
   read_only: true
   tmpfs:
     - /tmp:size=8m,mode=1777
@@ -23,6 +26,13 @@ x-demo-backend: &demo-backend
     timeout: 2s
     retries: 10
     start_period: 3s
+  logging:
+    driver: json-file
+    options:
+      max-size: "5m"
+      max-file: "2"
+  mem_limit: 96m
+  pids_limit: 128
 
 services:
   postgres:
@@ -44,6 +54,8 @@ services:
       - /var/run/postgresql:size=4m,mode=0770
     security_opt:
       - no-new-privileges:true
+    mem_limit: 384m
+    pids_limit: 128
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U shlb_api -d shlb"]
       interval: 5s
@@ -72,6 +84,8 @@ services:
       - /tmp:size=4m,mode=0700
     security_opt:
       - no-new-privileges:true
+    mem_limit: 128m
+    pids_limit: 96
     healthcheck:
       test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$(cat /run/secrets/redis_password)\" redis-cli ping | grep -q PONG"]
       interval: 5s
@@ -99,7 +113,7 @@ services:
       SHLB_REDIS_HOST: redis
       SHLB_REDIS_PORT: "6379"
       SHLB_COOKIE_SECURE: "true"
-      SHLB_ALLOWED_ORIGINS: https://localhost:8443,https://127.0.0.1:8443
+      SHLB_ALLOWED_ORIGINS: ${SHLB_ALLOWED_ORIGINS:-https://localhost:8443,https://127.0.0.1:8443}
     secrets:
       - postgres_password
       - redis_password
@@ -108,19 +122,85 @@ services:
     expose:
       - "8000"
     networks:
-      - edge_net
+      - api_edge_net
       - control_data_net
     read_only: true
     tmpfs:
       - /tmp:size=16m,mode=1777
     security_opt:
       - no-new-privileges:true
+    mem_limit: 384m
+    pids_limit: 128
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=2).read()"]
       interval: 5s
       timeout: 3s
       retries: 20
       start_period: 12s
+
+  control-worker:
+    build:
+      context: .
+      dockerfile: control-api/Dockerfile
+    image: shlb/control-worker:prototype
+    entrypoint: ["/app/worker-entrypoint.sh"]
+    restart: unless-stopped
+    depends_on:
+      control-api:
+        condition: service_healthy
+      traffic-haproxy:
+        condition: service_healthy
+      prometheus:
+        condition: service_healthy
+    environment:
+      SHLB_ENVIRONMENT: local
+      SHLB_DATABASE_HOST: postgres
+      SHLB_DATABASE_PORT: "5432"
+      SHLB_DATABASE_NAME: shlb
+      SHLB_DATABASE_USER: shlb_api
+      SHLB_REDIS_HOST: redis
+      SHLB_REDIS_PORT: "6379"
+      SHLB_HAPROXY_RUNTIME_SOCKET: /var/run/haproxy/haproxy.sock
+      SHLB_PROMETHEUS_URL: http://prometheus:9090
+      SHLB_FAULT_TOKEN_FILE: /run/secrets/fault_control_token
+    secrets:
+      - postgres_password
+      - redis_password
+      - bootstrap_password
+      - field_encryption_key
+      - fault_control_token
+    volumes:
+      - haproxy-runtime:/var/run/haproxy
+    networks:
+      - control_data_net
+      - backend_net
+      - observability_net
+    group_add:
+      - "1000"
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 384m
+    pids_limit: 128
+    stop_grace_period: 5s
+    healthcheck:
+      test: ["CMD", "python", "-m", "shlb_api.worker_health"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
 
   edge-nginx:
     build:
@@ -132,16 +212,20 @@ services:
       traffic-haproxy:
         condition: service_healthy
     ports:
-      - "8080:8080"
-      - "8443:8443"
+      - "0.0.0.0:8080:8080"
+      - "0.0.0.0:8443:8443"
+    volumes:
+      - ./.local-certs:/etc/nginx/tls:ro
     networks:
-      - edge_net
+      - data_edge_net
+      - api_edge_net
     tmpfs:
-      - /etc/nginx/tls:size=4m,mode=0700
       - /var/cache/nginx:size=16m,mode=0755
       - /var/run:size=2m,mode=0755
     security_opt:
       - no-new-privileges:true
+    mem_limit: 96m
+    pids_limit: 96
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
       interval: 5s
@@ -165,24 +249,91 @@ services:
     expose:
       - "8080"
       - "8404"
-      - "5555"
     volumes:
-      - ./haproxy:/usr/local/etc/haproxy:rw
+      - ./haproxy:/usr/local/etc/haproxy:ro
       - haproxy-runtime:/var/run/haproxy
       - haproxy-state:/var/lib/haproxy
     networks:
-      edge_net: {}
+      data_edge_net: {}
       backend_net: {}
-      control_net:
-        ipv4_address: 172.30.0.10
+      observability_net: {}
     security_opt:
       - no-new-privileges:true
+    mem_limit: 160m
+    pids_limit: 128
     healthcheck:
-      test: ["CMD-SHELL", "haproxy -c -f /usr/local/etc/haproxy/haproxy.cfg >/dev/null && printf 'show info\\n' | socat - UNIX-CONNECT:/var/run/haproxy/haproxy.sock | grep -q '^Name:' && wget -q -O /dev/null --header 'Authorization: Basic cGhhc2UxX2FkbWluOnBoYXNlMV9vbmx5X2NoYW5nZV9tZQ==' http://172.30.0.10:5555/v3/health"]
+      test: ["CMD-SHELL", "haproxy -c -f /usr/local/etc/haproxy/haproxy.cfg >/dev/null && printf 'show info\\n' | socat - UNIX-CONNECT:/var/run/haproxy/haproxy.sock | grep -q '^Name:' && wget -q -O /dev/null http://127.0.0.1:8404/healthz"]
       interval: 5s
       timeout: 3s
       retries: 15
       start_period: 8s
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+  prometheus:
+    image: prom/prometheus:v3.5.0@sha256:63805ebb8d2b3920190daf1cb14a60871b16fd38bed42b857a3182bc621f4996
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=2h
+      - --storage.tsdb.retention.size=256MB
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    expose:
+      - "9090"
+    networks:
+      - observability_net
+    read_only: true
+    tmpfs:
+      - /tmp:size=8m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 384m
+    pids_limit: 128
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9090/-/ready"]
+      interval: 5s
+      timeout: 2s
+      retries: 20
+      start_period: 5s
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+  traffic-generator:
+    build:
+      context: .
+      dockerfile: traffic-generator/Dockerfile
+    image: shlb/traffic-generator:prototype
+    restart: unless-stopped
+    depends_on:
+      traffic-haproxy:
+        condition: service_healthy
+    environment:
+      TARGET_HOST: traffic-haproxy
+      TARGET_PORT: "8080"
+      REQUESTS_PER_SECOND: "40"
+    networks:
+      - data_edge_net
+    read_only: true
+    tmpfs:
+      - /tmp:size=4m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 64m
+    pids_limit: 64
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
 
   demo-backend-a:
     <<: *demo-backend
@@ -203,18 +354,17 @@ services:
       VERSION_ID: demo-v1
 
 networks:
-  edge_net:
+  data_edge_net:
+    driver: bridge
+  api_edge_net:
     driver: bridge
   backend_net:
     driver: bridge
     internal: true
-  control_net:
+  control_data_net:
     driver: bridge
     internal: true
-    ipam:
-      config:
-        - subnet: 172.30.0.0/24
-  control_data_net:
+  observability_net:
     driver: bridge
     internal: true
 
@@ -223,6 +373,7 @@ volumes:
   haproxy-state:
   postgres-data:
   redis-data:
+  prometheus-data:
 
 secrets:
   postgres_password:
@@ -233,3 +384,5 @@ secrets:
     file: ./.secrets/bootstrap_password
   field_encryption_key:
     file: ./.secrets/field_encryption_key
+  fault_control_token:
+    file: ./.secrets/fault_control_token

@@ -2,10 +2,8 @@
 
 import {
   AlertTriangle,
-  ArrowRight,
   Check,
   ChevronDown,
-  CircleDashed,
   FileDiff,
   KeyRound,
   LockKeyhole,
@@ -22,14 +20,156 @@ import { useSmallViewport } from "@/lib/use-small-viewport";
 export function VersionHealthPage() {
   return (
     <div className="page-stack">
-      <PageHeader eyebrow="Deployment cohort evidence" title="Version health" brief={<>Demo-v2 shows a bounded catalog regression against demo-v1, but its auth telemetry is stale. Cohort comparisons expose traffic mix and sample comparability before any version-scoped action is considered.</>} meta={<><span>demo-v1 · 2 instances · 67% traffic</span><span>demo-v2 · 1 instance · 33% traffic</span><span>Window 21:54–22:09 IST</span></>} />
-      <section className="version-comparison" aria-label="Version cohort comparison">
-        <article><div><code>demo-v1</code><StatusTag tone="success">CONTROL COHORT</StatusTag></div><strong>2 instances</strong><span>10 memberships · 12,140 requests</span><dl><div><dt>Success</dt><dd>98.7%</dd></div><div><dt>p95</dt><dd>184 ms</dd></div><div><dt>Traffic mix</dt><dd>Comparable</dd></div></dl></article>
-        <div className="version-delta"><span>catalog delta</span><strong>+16.4%</strong><small>p95 · confidence interval retained</small><i /></div>
-        <article className="current"><div><code>demo-v2</code><StatusTag tone="warning">CURRENT COHORT</StatusTag></div><strong>1 instance</strong><span>4 memberships · 6,302 requests</span><dl><div><dt>Success</dt><dd>97.9%</dd></div><div><dt>p95</dt><dd>214 ms</dd></div><div><dt>Traffic mix</dt><dd>Auth incomplete</dd></div></dl></article>
+      <PageHeader
+        eyebrow="Deployment cohort evidence"
+        title="Version health"
+        brief={
+          <>
+            Demo-v2 shows a bounded catalog regression against demo-v1, but its
+            auth telemetry is stale. Cohort comparisons expose traffic mix and
+            sample comparability before any version-scoped action is considered.
+          </>
+        }
+        meta={
+          <>
+            <span>demo-v1 · 2 instances · 67% traffic</span>
+            <span>demo-v2 · 1 instance · 33% traffic</span>
+            <span>Window 21:54–22:09 IST</span>
+          </>
+        }
+      />
+      <section
+        className="version-comparison"
+        aria-label="Version cohort comparison"
+      >
+        <article>
+          <div>
+            <code>demo-v1</code>
+            <StatusTag tone="success">CONTROL COHORT</StatusTag>
+          </div>
+          <strong>2 instances</strong>
+          <span>10 memberships · 12,140 requests</span>
+          <dl>
+            <div>
+              <dt>Success</dt>
+              <dd>98.7%</dd>
+            </div>
+            <div>
+              <dt>p95</dt>
+              <dd>184 ms</dd>
+            </div>
+            <div>
+              <dt>Traffic mix</dt>
+              <dd>Comparable</dd>
+            </div>
+          </dl>
+        </article>
+        <div className="version-delta">
+          <span>catalog delta</span>
+          <strong>+16.4%</strong>
+          <small>p95 · confidence interval retained</small>
+          <i />
+        </div>
+        <article className="current">
+          <div>
+            <code>demo-v2</code>
+            <StatusTag tone="warning">CURRENT COHORT</StatusTag>
+          </div>
+          <strong>1 instance</strong>
+          <span>4 memberships · 6,302 requests</span>
+          <dl>
+            <div>
+              <dt>Success</dt>
+              <dd>97.9%</dd>
+            </div>
+            <div>
+              <dt>p95</dt>
+              <dd>214 ms</dd>
+            </div>
+            <div>
+              <dt>Traffic mix</dt>
+              <dd>Auth incomplete</dd>
+            </div>
+          </dl>
+        </article>
       </section>
-      <Panel title="Route evidence by version" kicker="Comparability before delta"><div className="table-scroll"><table className="data-table"><thead><tr><th>Route</th><th>demo-v1 control</th><th>demo-v2 current</th><th>Sample comparability</th><th>Fingerprint</th><th>Action state</th></tr></thead><tbody><tr><th><code>/public</code></th><td>p95 83 ms · 2,059 samples</td><td>p95 84 ms · 1,012 samples</td><td><StatusTag tone="success">comparable</StatusTag></td><td>no regression</td><td>none</td></tr><tr><th><code>/auth</code></th><td>p95 140 ms · 1,432 samples</td><td>no fresh interval</td><td><StatusTag tone="warning">insufficient</StatusTag></td><td>unknown</td><td>review</td></tr><tr><th><code>/catalog</code></th><td>p95 111 ms · 2,480 samples</td><td>p95 127 ms · 86 samples</td><td><StatusTag tone="warning">partial</StatusTag></td><td>version-consistent</td><td>reintegrating 20%</td></tr><tr><th><code>/checkout</code></th><td>p95 319 ms · 909 samples</td><td>p95 326 ms · 452 samples</td><td><StatusTag tone="success">comparable</StatusTag></td><td>no version support</td><td>none</td></tr></tbody></table></div></Panel>
-      <div className="notice warning"><AlertTriangle size={15} /><span>A version-group removal would touch every matching route membership. It is unavailable while a cohort has incomplete controls or insufficient residual stable-version capacity.</span></div>
+      <Panel
+        title="Route evidence by version"
+        kicker="Comparability before delta"
+      >
+        <div className="table-scroll">
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th>Route</th>
+                <th>demo-v1 control</th>
+                <th>demo-v2 current</th>
+                <th>Sample comparability</th>
+                <th>Fingerprint</th>
+                <th>Action state</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <th>
+                  <code>/public</code>
+                </th>
+                <td>p95 83 ms · 2,059 samples</td>
+                <td>p95 84 ms · 1,012 samples</td>
+                <td>
+                  <StatusTag tone="success">comparable</StatusTag>
+                </td>
+                <td>no regression</td>
+                <td>none</td>
+              </tr>
+              <tr>
+                <th>
+                  <code>/auth</code>
+                </th>
+                <td>p95 140 ms · 1,432 samples</td>
+                <td>no fresh interval</td>
+                <td>
+                  <StatusTag tone="warning">insufficient</StatusTag>
+                </td>
+                <td>unknown</td>
+                <td>review</td>
+              </tr>
+              <tr>
+                <th>
+                  <code>/catalog</code>
+                </th>
+                <td>p95 111 ms · 2,480 samples</td>
+                <td>p95 127 ms · 86 samples</td>
+                <td>
+                  <StatusTag tone="warning">partial</StatusTag>
+                </td>
+                <td>version-consistent</td>
+                <td>reintegrating 20%</td>
+              </tr>
+              <tr>
+                <th>
+                  <code>/checkout</code>
+                </th>
+                <td>p95 319 ms · 909 samples</td>
+                <td>p95 326 ms · 452 samples</td>
+                <td>
+                  <StatusTag tone="success">comparable</StatusTag>
+                </td>
+                <td>no version support</td>
+                <td>none</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </Panel>
+      <div className="notice warning">
+        <AlertTriangle size={15} />
+        <span>
+          A version-group removal would touch every matching route membership.
+          It is unavailable while a cohort has incomplete controls or
+          insufficient residual stable-version capacity.
+        </span>
+      </div>
     </div>
   );
 }
@@ -39,48 +179,672 @@ export function PoliciesPage() {
   const [reviewOpen, setReviewOpen] = useState(false);
   const [diffOpen, setDiffOpen] = useState(false);
   const smallViewport = useSmallViewport();
-  const sections = ["Route match", "Capacity and scope", "Retry safety", "Verification", "Reintegration", "Approval"];
+  const sections = [
+    "Route match",
+    "Capacity and scope",
+    "Retry safety",
+    "Verification",
+    "Reintegration",
+    "Approval",
+  ];
   return (
     <div className="page-stack policies-page">
-      <PageHeader eyebrow="Versioned deterministic policy" title="Routing policies" brief={<>Policy revision 12 governs checkout reserve, retry suppression, verification, and recovery. Raw HAProxy directives are not accepted; structural route changes require a separately validated reload.</>} meta={<><StatusTag tone="success">ACTIVE · revision 12</StatusTag><span>route /checkout</span><span>updated 18 Jul by Project Admin</span></>} actions={<><button className="button secondary" type="button" aria-expanded={diffOpen} onClick={() => setDiffOpen((value) => !value)}><FileDiff size={15} />{diffOpen ? "Hide machine diff" : "View machine diff"}</button><button className="button primary" type="button" disabled={smallViewport} title={smallViewport ? "Policy activation is unavailable below 768px" : undefined} onClick={() => setReviewOpen(true)}><Save size={15} />Review activation</button></>} />
-      {smallViewport && <div className="notice warning" role="status"><ShieldAlert size={15} /><span>Policy editing is disabled below 768px. Use a desktop review surface for any configuration change.</span></div>}
-      {diffOpen && <Panel title="Revision 12 → draft 13" kicker="Normalized machine diff"><div className="policy-machine-diff"><div><code>- minimum_physical_reserve: 45</code></div><div className="added"><code>+ minimum_physical_reserve: 50</code></div><div><code>  maximum_simultaneous_quarantine: 1</code></div><div><code>  ambiguous_post_retry: suppress</code></div></div><div className="notice neutral"><ShieldCheck size={15} /><span>Normalized policy fields are shown. Raw HAProxy commands are never accepted by this editor.</span></div></Panel>}
+      <PageHeader
+        eyebrow="Versioned deterministic policy"
+        title="Routing policies"
+        brief={
+          <>
+            Policy revision 12 governs checkout reserve, retry suppression,
+            verification, and recovery. Raw HAProxy directives are not accepted;
+            structural route changes require a separately validated reload.
+          </>
+        }
+        meta={
+          <>
+            <StatusTag tone="success">ACTIVE · revision 12</StatusTag>
+            <span>route /checkout</span>
+            <span>updated 18 Jul by Project Admin</span>
+          </>
+        }
+        actions={
+          <>
+            <button
+              className="button secondary"
+              type="button"
+              aria-expanded={diffOpen}
+              onClick={() => setDiffOpen((value) => !value)}
+            >
+              <FileDiff size={15} />
+              {diffOpen ? "Hide machine diff" : "View machine diff"}
+            </button>
+            <button
+              className="button primary"
+              type="button"
+              disabled={smallViewport}
+              title={
+                smallViewport
+                  ? "Policy activation is unavailable below 768px"
+                  : undefined
+              }
+              onClick={() => setReviewOpen(true)}
+            >
+              <Save size={15} />
+              Review activation
+            </button>
+          </>
+        }
+      />
+      {smallViewport && (
+        <div className="notice warning" role="status">
+          <ShieldAlert size={15} />
+          <span>
+            Policy editing is disabled below 768px. Use a desktop review surface
+            for any configuration change.
+          </span>
+        </div>
+      )}
+      {diffOpen && (
+        <Panel title="Revision 12 → draft 13" kicker="Normalized machine diff">
+          <div className="policy-machine-diff">
+            <div>
+              <code>- minimum_physical_reserve: 45</code>
+            </div>
+            <div className="added">
+              <code>+ minimum_physical_reserve: 50</code>
+            </div>
+            <div>
+              <code> maximum_simultaneous_quarantine: 1</code>
+            </div>
+            <div>
+              <code> ambiguous_post_retry: suppress</code>
+            </div>
+          </div>
+          <div className="notice neutral">
+            <ShieldCheck size={15} />
+            <span>
+              Normalized policy fields are shown. Raw HAProxy commands are never
+              accepted by this editor.
+            </span>
+          </div>
+        </Panel>
+      )}
       <div className="policy-layout">
-        <aside className="policy-sections" aria-label="Policy sections">{sections.map((item) => <button type="button" className={section === item ? "active" : ""} onClick={() => setSection(item)} key={item}><span>{item}</span>{item === "Retry safety" && <StatusTag tone="success" icon={false}>hard gate</StatusTag>}</button>)}</aside>
-        <section className="panel policy-editor" aria-labelledby="policy-section-title"><div className="panel-heading"><div><span className="section-kicker">Draft revision 13</span><h2 id="policy-section-title">{section}</h2></div><StatusTag tone="warning">UNSAVED FIXTURE</StatusTag></div><fieldset className="policy-fieldset" disabled={smallViewport}><legend className="sr-only">{section} policy fields</legend><PolicySection section={section} /></fieldset></section>
-        <aside className="policy-impact" aria-labelledby="policy-impact-title"><span className="section-kicker">Impact preview</span><h2 id="policy-impact-title">Current draft</h2><dl><div><dt>Affected route</dt><dd><code>/checkout</code></dd></div><div><dt>Memberships evaluated</dt><dd>3</dd></div><div><dt>Physical reserve floor</dt><dd>50%</dd></div><div><dt>Automatic target cap</dt><dd>1 membership</dd></div><div><dt>Reload requirement</dt><dd>None for this draft</dd></div></dl><div className="notice neutral"><ShieldCheck size={15} /><span>Changing route match or membership structure would show <strong>Validated reload required</strong>.</span></div></aside>
+        <aside className="policy-sections" aria-label="Policy sections">
+          {sections.map((item) => (
+            <button
+              type="button"
+              className={section === item ? "active" : ""}
+              onClick={() => setSection(item)}
+              key={item}
+            >
+              <span>{item}</span>
+              {item === "Retry safety" && (
+                <StatusTag tone="success" icon={false}>
+                  hard gate
+                </StatusTag>
+              )}
+            </button>
+          ))}
+        </aside>
+        <section
+          className="panel policy-editor"
+          aria-labelledby="policy-section-title"
+        >
+          <div className="panel-heading">
+            <div>
+              <span className="section-kicker">Draft revision 13</span>
+              <h2 id="policy-section-title">{section}</h2>
+            </div>
+            <StatusTag tone="warning">UNSAVED FIXTURE</StatusTag>
+          </div>
+          <fieldset className="policy-fieldset" disabled={smallViewport}>
+            <legend className="sr-only">{section} policy fields</legend>
+            <PolicySection section={section} />
+          </fieldset>
+        </section>
+        <aside className="policy-impact" aria-labelledby="policy-impact-title">
+          <span className="section-kicker">Impact preview</span>
+          <h2 id="policy-impact-title">Current draft</h2>
+          <dl>
+            <div>
+              <dt>Affected route</dt>
+              <dd>
+                <code>/checkout</code>
+              </dd>
+            </div>
+            <div>
+              <dt>Memberships evaluated</dt>
+              <dd>3</dd>
+            </div>
+            <div>
+              <dt>Physical reserve floor</dt>
+              <dd>50%</dd>
+            </div>
+            <div>
+              <dt>Automatic target cap</dt>
+              <dd>1 membership</dd>
+            </div>
+            <div>
+              <dt>Reload requirement</dt>
+              <dd>None for this draft</dd>
+            </div>
+          </dl>
+          <div className="notice neutral">
+            <ShieldCheck size={15} />
+            <span>
+              Changing route match or membership structure would show{" "}
+              <strong>Validated reload required</strong>.
+            </span>
+          </div>
+        </aside>
       </div>
-      <ReviewDialog open={reviewOpen} onClose={() => setReviewOpen(false)} title="Activate routing policy revision 13" intent="Activation would create a versioned policy pointer after validation. It cannot express raw HAProxy commands or bypass action-level safety review." actionLabel="Activate revision" />
+      <ReviewDialog
+        open={reviewOpen}
+        onClose={() => setReviewOpen(false)}
+        title="Activate routing policy revision 13"
+        intent="Activation would create a versioned policy pointer after validation. It cannot express raw HAProxy commands or bypass action-level safety review."
+        actionLabel="Activate revision"
+      />
     </div>
   );
 }
 
 function PolicySection({ section }: { section: string }) {
-  if (section === "Route match") return <div className="policy-form"><label>Match type<select defaultValue="Exact + prefix"><option>Exact + prefix</option></select><ChevronDown size={13} /></label><label>Canonical route value<input defaultValue="/checkout" /></label><label>Criticality<select defaultValue="Critical"><option>Critical</option><option>High</option><option>Standard</option></select><ChevronDown size={13} /></label><div className="notice neutral"><Check size={15} /><span>Normalized precedence is deterministic and has no overlap with public, auth, or catalog.</span></div></div>;
-  if (section === "Capacity and scope") return <div className="policy-form"><label>Minimum physical reserve<span className="input-suffix"><input type="number" defaultValue="50" /><em>%</em></span><small>Computed across unique physical instances, never logical membership copies.</small></label><label>Maximum simultaneous quarantine<input type="number" defaultValue="1" /></label><label>Minimum actionable completeness<span className="input-suffix"><input type="number" defaultValue="80" /><em>%</em></span></label><label className="check-control"><input type="checkbox" defaultChecked />Allow route × instance quarantine</label><label className="check-control"><input type="checkbox" />Allow complete-instance drain without approval</label></div>;
-  if (section === "Retry safety") return <div className="policy-form"><div className="hard-gate-banner"><LockKeyhole size={17} /><div><strong>Retry rules are deterministic and model-independent.</strong><p>Neither classification confidence nor an optional reporting model can override this matrix.</p></div></div><label>Maximum cross-instance retries<input type="number" defaultValue="1" /></label><label>Ambiguous POST behavior<select defaultValue="Suppress retry"><option>Suppress retry</option></select><ChevronDown size={13} /></label><label>Shared-route failure<select defaultValue="Suppress and fail fast"><option>Suppress and fail fast</option></select><ChevronDown size={13} /></label></div>;
-  if (section === "Verification") return <div className="policy-form two-up"><label>Minimum duration<span className="input-suffix"><input type="number" defaultValue="30" /><em>s</em></span></label><label>Maximum duration<span className="input-suffix"><input type="number" defaultValue="180" /><em>s</em></span></label><label>Affected minimum samples<input type="number" defaultValue="300" /></label><label>Preserved minimum samples<input type="number" defaultValue="300" /></label><label>p95 non-regression bound<span className="input-suffix"><input type="number" defaultValue="10" /><em>%</em></span></label><label>Success non-regression<span className="input-suffix"><input type="number" defaultValue="1" /><em>pp</em></span></label></div>;
-  if (section === "Reintegration") return <div className="policy-form"><div className="stage-policy-row">{["PROBING", "5%", "20%", "50%", "100%", "HEALTHY"].map((stage) => <span key={stage}>{stage}</span>)}</div><label>Base cooldown<span className="input-suffix"><input type="number" defaultValue="60" /><em>s</em></span></label><label>Maximum cooldown<span className="input-suffix"><input type="number" defaultValue="3600" /><em>s</em></span></label><label>Maximum failed recovery attempts<input type="number" defaultValue="3" /></label></div>;
-  return <div className="policy-form"><label>Route-local automatic action<select defaultValue="Policy authorized"><option>Policy authorized</option><option>Operator approval</option></select><ChevronDown size={13} /></label><label>Complete-instance or version action<select defaultValue="Approver required"><option>Approver required</option></select><ChevronDown size={13} /></label><label>Global protection policy<select defaultValue="Two approvers in PILOT"><option>Two approvers in PILOT</option></select><ChevronDown size={13} /></label><div className="notice warning"><ShieldAlert size={15} /><span>Operator authority does not bypass residual-capacity, retry, rollback, generation, or configuration validation.</span></div></div>;
+  if (section === "Route match")
+    return (
+      <div className="policy-form">
+        <label>
+          Match type
+          <select defaultValue="Exact + prefix">
+            <option>Exact + prefix</option>
+          </select>
+          <ChevronDown size={13} />
+        </label>
+        <label>
+          Canonical route value
+          <input defaultValue="/checkout" />
+        </label>
+        <label>
+          Criticality
+          <select defaultValue="Critical">
+            <option>Critical</option>
+            <option>High</option>
+            <option>Standard</option>
+          </select>
+          <ChevronDown size={13} />
+        </label>
+        <div className="notice neutral">
+          <Check size={15} />
+          <span>
+            Normalized precedence is deterministic and has no overlap with
+            public, auth, or catalog.
+          </span>
+        </div>
+      </div>
+    );
+  if (section === "Capacity and scope")
+    return (
+      <div className="policy-form">
+        <label>
+          Minimum physical reserve
+          <span className="input-suffix">
+            <input type="number" defaultValue="50" />
+            <em>%</em>
+          </span>
+          <small>
+            Computed across unique physical instances, never logical membership
+            copies.
+          </small>
+        </label>
+        <label>
+          Maximum simultaneous quarantine
+          <input type="number" defaultValue="1" />
+        </label>
+        <label>
+          Minimum actionable completeness
+          <span className="input-suffix">
+            <input type="number" defaultValue="80" />
+            <em>%</em>
+          </span>
+        </label>
+        <label className="check-control">
+          <input type="checkbox" defaultChecked />
+          Allow route × instance quarantine
+        </label>
+        <label className="check-control">
+          <input type="checkbox" />
+          Allow complete-instance drain without approval
+        </label>
+      </div>
+    );
+  if (section === "Retry safety")
+    return (
+      <div className="policy-form">
+        <div className="hard-gate-banner">
+          <LockKeyhole size={17} />
+          <div>
+            <strong>
+              Retry rules are deterministic and model-independent.
+            </strong>
+            <p>
+              Neither classification confidence nor an optional reporting model
+              can override this matrix.
+            </p>
+          </div>
+        </div>
+        <label>
+          Maximum cross-instance retries
+          <input type="number" defaultValue="1" />
+        </label>
+        <label>
+          Ambiguous POST behavior
+          <select defaultValue="Suppress retry">
+            <option>Suppress retry</option>
+          </select>
+          <ChevronDown size={13} />
+        </label>
+        <label>
+          Shared-route failure
+          <select defaultValue="Suppress and fail fast">
+            <option>Suppress and fail fast</option>
+          </select>
+          <ChevronDown size={13} />
+        </label>
+      </div>
+    );
+  if (section === "Verification")
+    return (
+      <div className="policy-form two-up">
+        <label>
+          Minimum duration
+          <span className="input-suffix">
+            <input type="number" defaultValue="30" />
+            <em>s</em>
+          </span>
+        </label>
+        <label>
+          Maximum duration
+          <span className="input-suffix">
+            <input type="number" defaultValue="180" />
+            <em>s</em>
+          </span>
+        </label>
+        <label>
+          Affected minimum samples
+          <input type="number" defaultValue="300" />
+        </label>
+        <label>
+          Preserved minimum samples
+          <input type="number" defaultValue="300" />
+        </label>
+        <label>
+          p95 non-regression bound
+          <span className="input-suffix">
+            <input type="number" defaultValue="10" />
+            <em>%</em>
+          </span>
+        </label>
+        <label>
+          Success non-regression
+          <span className="input-suffix">
+            <input type="number" defaultValue="1" />
+            <em>pp</em>
+          </span>
+        </label>
+      </div>
+    );
+  if (section === "Reintegration")
+    return (
+      <div className="policy-form">
+        <div className="stage-policy-row">
+          {["PROBING", "5%", "20%", "50%", "100%", "HEALTHY"].map((stage) => (
+            <span key={stage}>{stage}</span>
+          ))}
+        </div>
+        <label>
+          Base cooldown
+          <span className="input-suffix">
+            <input type="number" defaultValue="60" />
+            <em>s</em>
+          </span>
+        </label>
+        <label>
+          Maximum cooldown
+          <span className="input-suffix">
+            <input type="number" defaultValue="3600" />
+            <em>s</em>
+          </span>
+        </label>
+        <label>
+          Maximum failed recovery attempts
+          <input type="number" defaultValue="3" />
+        </label>
+      </div>
+    );
+  return (
+    <div className="policy-form">
+      <label>
+        Route-local automatic action
+        <select defaultValue="Policy authorized">
+          <option>Policy authorized</option>
+          <option>Operator approval</option>
+        </select>
+        <ChevronDown size={13} />
+      </label>
+      <label>
+        Complete-instance or version action
+        <select defaultValue="Approver required">
+          <option>Approver required</option>
+        </select>
+        <ChevronDown size={13} />
+      </label>
+      <label>
+        Global protection policy
+        <select defaultValue="Two approvers in PILOT">
+          <option>Two approvers in PILOT</option>
+        </select>
+        <ChevronDown size={13} />
+      </label>
+      <div className="notice warning">
+        <ShieldAlert size={15} />
+        <span>
+          Operator authority does not bypass residual-capacity, retry, rollback,
+          generation, or configuration validation.
+        </span>
+      </div>
+    </div>
+  );
 }
 
 export function SettingsPage() {
   const [tab, setTab] = useState("Environment");
-  const tabs = ["Project", "Environment", "Users and RBAC", "Integrations", "Retention", "Audit", "Dangerous operations"];
+  const tabs = [
+    "Project",
+    "Environment",
+    "Users and RBAC",
+    "Integrations",
+    "Retention",
+    "Audit",
+    "Dangerous operations",
+  ];
   return (
     <div className="page-stack settings-page" id="safe-mode">
-      <PageHeader eyebrow="Project configuration" title="Settings" brief={<>Configuration is grouped by authority and blast radius. Phase 2 persists identity, registry, and versioned policy foundations; this screen keeps future control-only fields read-only.</>} meta={<><span>Project self-healing-load-balancer</span><span>Environment Local traffic lab</span><span>Role supplied by authenticated session</span></>} />
-      <div className="settings-layout"><aside className="settings-tabs">{tabs.map((item) => <button type="button" className={tab === item ? "active" : ""} onClick={() => setTab(item)} key={item}>{item}</button>)}</aside><section className="settings-content"><SettingsSection tab={tab} /></section></div>
+      <PageHeader
+        eyebrow="Project configuration"
+        title="Settings"
+        brief={
+          <>
+            Configuration is grouped by authority and blast radius. Phase 2
+            persists identity, registry, and versioned policy foundations; this
+            screen keeps future control-only fields read-only.
+          </>
+        }
+        meta={
+          <>
+            <span>Project self-healing-load-balancer</span>
+            <span>Environment Local traffic lab</span>
+            <span>Role supplied by authenticated session</span>
+          </>
+        }
+      />
+      <div className="settings-layout">
+        <aside className="settings-tabs">
+          {tabs.map((item) => (
+            <button
+              type="button"
+              className={tab === item ? "active" : ""}
+              onClick={() => setTab(item)}
+              key={item}
+            >
+              {item}
+            </button>
+          ))}
+        </aside>
+        <section className="settings-content">
+          <SettingsSection tab={tab} />
+        </section>
+      </div>
     </div>
   );
 }
 
 function SettingsSection({ tab }: { tab: string }) {
-  if (tab === "Environment") return <><Panel title="Operating mode" kicker="Environment authority"><div className="setting-row"><div><strong>RULES_ONLY</strong><p>Rules classify and policy-gated actions may be planned. Model output remains shadow evidence.</p></div><button className="button secondary" type="button" disabled>Change mode</button></div><div className="setting-row safe-mode-setting"><div><ShieldCheck size={18} /><span><strong>Safe mode is not active</strong><p>Leaving SAFE_MODE would require full desired/observed reconciliation, healthy dependencies, and authorized recovery.</p></span></div><button className="button danger" type="button" disabled>Enter safe mode</button></div></Panel><Panel title="Environment identity" kicker="Read-only fixture"><div className="settings-form-grid"><label>Name<input defaultValue="Local traffic lab" disabled /></label><label>Kind<select defaultValue="LAB" disabled><option>LAB</option></select></label><label>Time zone<input defaultValue="Asia/Kolkata" disabled /></label><label>Controller generation<input defaultValue="184" disabled /></label></div></Panel></>;
-  if (tab === "Users and RBAC") return <Panel title="Users and roles" kicker="Project-scoped authorization"><div className="role-list"><div><UserRoundCog size={17} /><span><strong>Demo Viewer</strong><small>viewer@local.test · current fixture identity</small></span><StatusTag tone="neutral">VIEWER</StatusTag></div><div><UserRoundCog size={17} /><span><strong>Reliability Operator</strong><small>operator@local.test · inactive fixture</small></span><StatusTag tone="warning">OPERATOR</StatusTag></div><div><UserRoundCog size={17} /><span><strong>Project Approver</strong><small>approver@local.test · inactive fixture</small></span><StatusTag tone="danger">APPROVER</StatusTag></div></div><div className="notice neutral"><LockKeyhole size={15} /><span>Viewer controls never mutate state; crafted requests must still be rejected by server-side authorization.</span></div></Panel>;
-  if (tab === "Integrations") return <Panel title="Integration boundaries" kicker="Secret references, not values"><div className="integration-list"><div><KeyRound size={17} /><span><strong>HAProxy Data Plane API</strong><small>worker-only authority · no API credential mounted</small></span><StatusTag tone="neutral">not deployed</StatusTag></div><div><SlidersHorizontal size={17} /><span><strong>Prometheus</strong><small>server-owned query templates</small></span><StatusTag tone="warning">fixture only</StatusTag></div><div><ShieldCheck size={17} /><span><strong>Ollama reporting</strong><small>disabled · deterministic report path remains</small></span><StatusTag tone="neutral">optional</StatusTag></div></div></Panel>;
-  if (tab === "Retention") return <Panel title="Retention policy" kicker="Bounded local profile"><div className="settings-form-grid"><label>Metrics retention<input defaultValue="3 days" disabled /></label><label>Structured logs<input defaultValue="3 days" disabled /></label><label>Incident and action records<input defaultValue="1 year (lab)" disabled /></label><label>Audit records<input defaultValue="1 semester minimum" disabled /></label></div></Panel>;
-  if (tab === "Audit") return <Panel title="Audit assurance" kicker="Tamper-evident within declared trust"><div className="audit-summary"><ShieldCheck size={20} /><div><strong>Append-only application role · hash-chained events</strong><p>Host or database administrators remain inside the threat boundary. The system does not claim absolute immutability.</p></div></div><div className="setting-row"><span>Last continuity check</span><code>fixture · sequence 18,204 · hash 6fd1…a44c</code></div></Panel>;
-  if (tab === "Dangerous operations") return <Panel title="Dangerous operations" kicker="High-impact controls"><div className="danger-zone"><article><div><strong>Archive environment</strong><p>Requires no active action or incident, typed environment name, reason, and Project Admin.</p></div><button className="button danger" disabled>Archive</button></article><article><div><strong>Disable safe mode</strong><p>Requires healthy full reconciliation and Approver or Project Admin authority.</p></div><button className="button danger" disabled>Recover</button></article><article><div><strong>Purge project</strong><p>Two-stage archive then approved purge after retention and research holds.</p></div><button className="button danger" disabled>Purge</button></article></div></Panel>;
-  return <Panel title="Project metadata" kicker="Identity"><div className="settings-form-grid"><label>Project name<input defaultValue="Local reliability lab" disabled /></label><label>Project slug<input defaultValue="local-reliability-lab" disabled /></label><label>Owning team<input defaultValue="SHLB research team" disabled /></label><label>Status<input defaultValue="ACTIVE" disabled /></label></div></Panel>;
+  if (tab === "Environment")
+    return (
+      <>
+        <Panel title="Operating mode" kicker="Environment authority">
+          <div className="setting-row">
+            <div>
+              <strong>RULES_ONLY</strong>
+              <p>
+                Rules classify and policy-gated actions may be planned. Model
+                output remains shadow evidence.
+              </p>
+            </div>
+            <button className="button secondary" type="button" disabled>
+              Change mode
+            </button>
+          </div>
+          <div className="setting-row safe-mode-setting">
+            <div>
+              <ShieldCheck size={18} />
+              <span>
+                <strong>Safe mode is not active</strong>
+                <p>
+                  Leaving SAFE_MODE would require full desired/observed
+                  reconciliation, healthy dependencies, and authorized recovery.
+                </p>
+              </span>
+            </div>
+            <button className="button danger" type="button" disabled>
+              Enter safe mode
+            </button>
+          </div>
+        </Panel>
+        <Panel title="Environment identity" kicker="Read-only fixture">
+          <div className="settings-form-grid">
+            <label>
+              Name
+              <input defaultValue="Local traffic lab" disabled />
+            </label>
+            <label>
+              Kind
+              <select defaultValue="LAB" disabled>
+                <option>LAB</option>
+              </select>
+            </label>
+            <label>
+              Time zone
+              <input defaultValue="Asia/Kolkata" disabled />
+            </label>
+            <label>
+              Controller generation
+              <input defaultValue="184" disabled />
+            </label>
+          </div>
+        </Panel>
+      </>
+    );
+  if (tab === "Users and RBAC")
+    return (
+      <Panel title="Users and roles" kicker="Project-scoped authorization">
+        <div className="role-list">
+          <div>
+            <UserRoundCog size={17} />
+            <span>
+              <strong>Demo Viewer</strong>
+              <small>viewer@local.test · current fixture identity</small>
+            </span>
+            <StatusTag tone="neutral">VIEWER</StatusTag>
+          </div>
+          <div>
+            <UserRoundCog size={17} />
+            <span>
+              <strong>Reliability Operator</strong>
+              <small>operator@local.test · inactive fixture</small>
+            </span>
+            <StatusTag tone="warning">OPERATOR</StatusTag>
+          </div>
+          <div>
+            <UserRoundCog size={17} />
+            <span>
+              <strong>Project Approver</strong>
+              <small>approver@local.test · inactive fixture</small>
+            </span>
+            <StatusTag tone="danger">APPROVER</StatusTag>
+          </div>
+        </div>
+        <div className="notice neutral">
+          <LockKeyhole size={15} />
+          <span>
+            Viewer controls never mutate state; crafted requests must still be
+            rejected by server-side authorization.
+          </span>
+        </div>
+      </Panel>
+    );
+  if (tab === "Integrations")
+    return (
+      <Panel
+        title="Integration boundaries"
+        kicker="Secret references, not values"
+      >
+        <div className="integration-list">
+          <div>
+            <KeyRound size={17} />
+            <span>
+              <strong>HAProxy Data Plane API</strong>
+              <small>worker-only authority · no API credential mounted</small>
+            </span>
+            <StatusTag tone="neutral">not deployed</StatusTag>
+          </div>
+          <div>
+            <SlidersHorizontal size={17} />
+            <span>
+              <strong>Prometheus</strong>
+              <small>server-owned query templates</small>
+            </span>
+            <StatusTag tone="warning">fixture only</StatusTag>
+          </div>
+          <div>
+            <ShieldCheck size={17} />
+            <span>
+              <strong>Ollama reporting</strong>
+              <small>disabled · deterministic report path remains</small>
+            </span>
+            <StatusTag tone="neutral">optional</StatusTag>
+          </div>
+        </div>
+      </Panel>
+    );
+  if (tab === "Retention")
+    return (
+      <Panel title="Retention policy" kicker="Bounded local profile">
+        <div className="settings-form-grid">
+          <label>
+            Metrics retention
+            <input defaultValue="3 days" disabled />
+          </label>
+          <label>
+            Structured logs
+            <input defaultValue="3 days" disabled />
+          </label>
+          <label>
+            Incident and action records
+            <input defaultValue="1 year (lab)" disabled />
+          </label>
+          <label>
+            Audit records
+            <input defaultValue="1 semester minimum" disabled />
+          </label>
+        </div>
+      </Panel>
+    );
+  if (tab === "Audit")
+    return (
+      <Panel
+        title="Audit assurance"
+        kicker="Tamper-evident within declared trust"
+      >
+        <div className="audit-summary">
+          <ShieldCheck size={20} />
+          <div>
+            <strong>Append-only application role · hash-chained events</strong>
+            <p>
+              Host or database administrators remain inside the threat boundary.
+              The system does not claim absolute immutability.
+            </p>
+          </div>
+        </div>
+        <div className="setting-row">
+          <span>Last continuity check</span>
+          <code>fixture · sequence 18,204 · hash 6fd1…a44c</code>
+        </div>
+      </Panel>
+    );
+  if (tab === "Dangerous operations")
+    return (
+      <Panel title="Dangerous operations" kicker="High-impact controls">
+        <div className="danger-zone">
+          <article>
+            <div>
+              <strong>Archive environment</strong>
+              <p>
+                Requires no active action or incident, typed environment name,
+                reason, and Project Admin.
+              </p>
+            </div>
+            <button className="button danger" disabled>
+              Archive
+            </button>
+          </article>
+          <article>
+            <div>
+              <strong>Disable safe mode</strong>
+              <p>
+                Requires healthy full reconciliation and Approver or Project
+                Admin authority.
+              </p>
+            </div>
+            <button className="button danger" disabled>
+              Recover
+            </button>
+          </article>
+          <article>
+            <div>
+              <strong>Purge project</strong>
+              <p>
+                Two-stage archive then approved purge after retention and
+                research holds.
+              </p>
+            </div>
+            <button className="button danger" disabled>
+              Purge
+            </button>
+          </article>
+        </div>
+      </Panel>
+    );
+  return (
+    <Panel title="Project metadata" kicker="Identity">
+      <div className="settings-form-grid">
+        <label>
+          Project name
+          <input defaultValue="Local reliability lab" disabled />
+        </label>
+        <label>
+          Project slug
+          <input defaultValue="local-reliability-lab" disabled />
+        </label>
+        <label>
+          Owning team
+          <input defaultValue="SHLB research team" disabled />
+        </label>
+        <label>
+          Status
+          <input defaultValue="ACTIVE" disabled />
+        </label>
+      </div>
+    </Panel>
+  );
 }

@@ -35,6 +35,7 @@ write_urlsafe_key() {
 write_random_secret "$secret_dir/postgres_password" 36
 write_random_secret "$secret_dir/redis_password" 36
 write_random_secret "$secret_dir/bootstrap_password" 30
+write_random_secret "$secret_dir/fault_control_token" 36
 write_urlsafe_key "$secret_dir/field_encryption_key"
 
 printf 'Phase 2 secret files are present in %s (values not printed).\n' "$secret_dir"

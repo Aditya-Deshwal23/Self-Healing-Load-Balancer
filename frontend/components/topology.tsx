@@ -17,12 +17,13 @@ import {
   Workflow,
 } from "lucide-react";
 import { useState, type CSSProperties } from "react";
-import { instances, routes } from "@/lib/fixtures";
+import { useDemoSnapshot } from "@/lib/demo/provider";
 import { StatusTag } from "@/components/ui";
 
 type TopologyMode = "observed" | "desired" | "compare";
 
 export function LiveTopology({ compact = false }: { compact?: boolean }) {
+  const { instances, routes } = useDemoSnapshot();
   const [isolatedRoute, setIsolatedRoute] = useState(compact ? "checkout" : "all");
   const [mode, setMode] = useState<TopologyMode>("compare");
   const [frozen, setFrozen] = useState(false);
@@ -106,6 +107,7 @@ function TopologyNode({
 }
 
 function TopologyList() {
+  const { instances, routes } = useDemoSnapshot();
   return (
     <div className="topology-list" aria-label="Accessible traffic topology hierarchy">
       <ol>

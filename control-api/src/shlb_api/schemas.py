@@ -195,6 +195,15 @@ class RetryPolicyCreate(BaseModel):
     ambiguous_post_behavior: str = Field(min_length=1, max_length=32)
 
 
+class LabFaultCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    scenario: str = Field(
+        pattern=r"^(CHECKOUT_INST_B_FAILURE|INST_B_DOWN|SHARED_CHECKOUT_FAILURE|UNKNOWN_CONFLICT)$"
+    )
+    duration_seconds: int = Field(default=120, ge=5, le=600)
+
+
 class FingerprintContract(BaseModel):
     """Versioned Phase-2 evidence contract; persistence is introduced in later evidence phases."""
 

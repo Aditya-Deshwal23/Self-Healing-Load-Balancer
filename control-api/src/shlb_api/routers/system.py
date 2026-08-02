@@ -7,20 +7,21 @@ from redis import Redis
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
-from shlb_api.contracts import resource_envelope
+from shlb_api.contracts import isoformat, resource_envelope, utc_now
 from shlb_api.database import get_db
 from shlb_api.dependencies import AuthContext, get_auth_context, require_environment
 from shlb_api.models import (
     BackendInstance,
+    ControllerGeneration,
     Environment,
     Project,
     RouteGroup,
     RouteMembership,
     Service,
+    ObservedStateSnapshot,
 )
 from shlb_api.problem import ApiProblem
 from shlb_api.runtime import get_redis
-from shlb_api.schemas import FailureClass
 
 router = APIRouter(tags=["system"])
 
@@ -94,6 +95,19 @@ def system_status(
         .join(Service, Service.id == RouteGroup.service_id)
         .where(Service.environment_id == environment.id)
     )
+    generation = db.scalar(
+        select(ControllerGeneration)
+        .where(ControllerGeneration.environment_id == environment.id)
+        .order_by(ControllerGeneration.generation.desc())
+        .limit(1)
+    )
+    snapshot = db.scalar(
+        select(ObservedStateSnapshot)
+        .where(ObservedStateSnapshot.environment_id == environment.id)
+        .order_by(ObservedStateSnapshot.observed_at.desc())
+        .limit(1)
+    )
+    worker_fresh = bool(generation and generation.status == "ACTIVE" and (utc_now() - generation.last_heartbeat_at).total_seconds() <= 10)
     return resource_envelope(
         request,
         {
@@ -115,17 +129,17 @@ def system_status(
                     "application dependency",
                 ],
                 "control_plane_in_request_path": False,
-                "observed_state": "UNKNOWN",
-                "reason": "Phase 2 intentionally has no HAProxy readback authority.",
+                "observed_state": "CONFIRMED" if snapshot else "UNKNOWN",
+                "reason": "Readback is persisted by the separately authorized worker." if snapshot else "No worker readback has been persisted yet.",
             },
             "control_plane": {
                 "api": "READY",
                 "postgresql": "READY",
                 "redis": "READY" if redis_client.ping() else "UNAVAILABLE",
                 "sse": "READY",
-                "worker": "NOT_DEPLOYED",
+                "worker": "READY" if worker_fresh else "STALE_OR_UNAVAILABLE",
                 "haproxy_access": False,
-                "control_authority": "ABSENT",
+                "control_authority": "API_EXCLUDED_WORKER_ONLY",
             },
             "registry": {
                 "route_groups": route_count or 0,
@@ -134,9 +148,9 @@ def system_status(
                 "capacity_semantics": "Physical instance capacity is counted once.",
             },
             "freshness": {
-                "control_loop": "NOT_STARTED",
-                "telemetry": "NOT_CONNECTED",
-                "last_confirmed_state": None,
+                "control_loop": isoformat(generation.last_heartbeat_at) if generation else None,
+                "telemetry": "CONNECTED" if snapshot else "NOT_CONNECTED",
+                "last_confirmed_state": isoformat(snapshot.observed_at) if snapshot else None,
             },
         },
     )
@@ -162,17 +176,20 @@ def system_capabilities(
     return resource_envelope(
         request,
         {
-            "phase": 2,
+            "phase": "rules-only-prototype",
             "features": {
                 "lab": lab_available,
                 "rest_registry": True,
                 "server_side_sessions": True,
                 "sse": True,
-                "haproxy_readback": False,
-                "routing_mutations": False,
-                "healing_actions": False,
+                "prometheus_evidence": True,
+                "haproxy_readback": True,
+                "routing_mutations": True,
+                "healing_actions": True,
+                "verification": True,
+                "reintegration": True,
             },
-            "failure_classes": [item.value for item in FailureClass],
+            "failure_classes": ["HEALTHY", "INSTANCE_DOWN", "ROUTE_INSTANCE_FAILURE", "SHARED_ROUTE_FAILURE", "UNKNOWN"],
             "contracts": {
                 "api": "v1",
                 "fingerprint": "fingerprint-v1",
@@ -187,6 +204,11 @@ def system_capabilities(
                     "Docker socket",
                     "host execution",
                 ],
+                "worker_process": ["Prometheus query", "direct probes", "HAProxy Runtime readback", "predeclared Runtime mutation"],
+            },
+            "prototype_support": {
+                "implemented": ["HEALTHY", "INSTANCE_DOWN", "ROUTE_INSTANCE_FAILURE", "SHARED_ROUTE_FAILURE", "UNKNOWN"],
+                "planned": ["INSTANCE_DEGRADED", "TRAFFIC_OVERLOAD", "VERSION_SPECIFIC_FAILURE", "ML classifier", "ELK", "local LLM"],
             },
         },
     )

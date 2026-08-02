@@ -67,6 +67,10 @@ def append_audit(
         event_hash=event_hash,
     )
     db.add(audit)
+    # A single transaction may emit multiple ordered events (for example,
+    # incident detection followed by classification). Flush the sequence row
+    # so the next append observes it before the outer transaction commits.
+    db.flush()
     return audit
 
 

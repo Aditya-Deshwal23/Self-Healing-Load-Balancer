@@ -1,8 +1,8 @@
 import type { Metadata } from "next";
-import { CommandCenter } from "@/components/command-center";
+import { LiveCommandCenterRoute } from "@/features/live-command-center-route";
 
 export const metadata: Metadata = { title: "Command Center" };
 
 export default function Page() {
-  return <CommandCenter />;
+  return <LiveCommandCenterRoute />;
 }

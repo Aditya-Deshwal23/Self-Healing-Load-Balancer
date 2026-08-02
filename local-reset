@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+
+project_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+cd "$project_dir"
+docker compose down --volumes --remove-orphans
+printf 'Removed only this Compose project\047s PostgreSQL, Redis, Prometheus, and HAProxy state volumes.\n'
+exec "$project_dir/local-up"

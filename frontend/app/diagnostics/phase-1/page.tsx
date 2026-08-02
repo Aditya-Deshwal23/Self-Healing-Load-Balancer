@@ -21,7 +21,7 @@ export default function PhaseOneDiagnostics() {
           </div>
         </header>
         <p className="lede narrow">
-          This route preserves the original diagnostic purpose without occupying the product root. Reaching it confirms that the exported console is being served by edge NGINX. It does not confirm the separate Phase 2 control API, telemetry, or automatic healing.
+          This route preserves the original diagnostic purpose without occupying the product root. Reaching it confirms that edge NGINX serves the static export; use System and the live Command Center to inspect the separate API, telemetry, worker and HAProxy readback.
         </p>
 
         <section className="diagnostic-grid" aria-label="Phase 1 boundaries">
@@ -38,7 +38,7 @@ export default function PhaseOneDiagnostics() {
           <article className="plain-panel">
             <Server aria-hidden="true" size={19} />
             <h2>Control boundary</h2>
-            <p>REST/SSE identity and registry contracts now exist separately. This diagnostic still makes no claim about those services or live traffic telemetry.</p>
+            <p>REST/SSE and the sole-writer worker exist separately. This page intentionally proves only the request path, not a controller decision.</p>
           </article>
         </section>
 

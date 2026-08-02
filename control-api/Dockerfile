@@ -17,8 +17,10 @@ COPY control-api/alembic.ini /app/alembic.ini
 COPY control-api/alembic /app/alembic
 COPY control-api/src /app/src
 COPY control-api/entrypoint.sh /app/entrypoint.sh
+COPY control-api/worker-entrypoint.sh /app/worker-entrypoint.sh
+COPY control-api/tests /app/tests
 
-RUN chmod 0555 /app/entrypoint.sh \
+RUN chmod 0555 /app/entrypoint.sh /app/worker-entrypoint.sh \
     && chown -R shlb-api:shlb-api /app
 
 USER shlb-api

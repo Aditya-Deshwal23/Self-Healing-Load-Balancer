@@ -102,9 +102,10 @@ def inspect_container(service: str) -> dict[str, Any]:
 def assert_runtime_boundaries() -> None:
     api = inspect_container("control-api")
     network_names = set(api["NetworkSettings"]["Networks"])
-    assert any(name.endswith("_edge_net") for name in network_names)
+    assert any(name.endswith("_api_edge_net") for name in network_names)
     assert any(name.endswith("_control_data_net") for name in network_names)
-    assert not any(name.endswith("_control_net") for name in network_names)
+    assert not any(name.endswith("_data_edge_net") for name in network_names)
+    assert not any(name.endswith("_observability_net") for name in network_names)
     assert not any(name.endswith("_backend_net") for name in network_names)
 
     mounts = json.dumps(api["Mounts"]).lower()
@@ -161,13 +162,21 @@ def main() -> int:
     _, status = client.request("GET", "/api/v1/system/status")
     control = status["data"]["control_plane"]
     assert control["haproxy_access"] is False
-    assert control["control_authority"] == "ABSENT"
-    assert status["data"]["data_plane"]["observed_state"] == "UNKNOWN"
+    assert control["control_authority"] == "API_EXCLUDED_WORKER_ONLY"
+    assert control["worker"] == "READY"
+    assert status["data"]["data_plane"]["observed_state"] == "CONFIRMED"
 
     _, capabilities = client.request("GET", "/api/v1/system/capabilities")
-    assert capabilities["data"]["phase"] == 2
-    assert capabilities["data"]["features"]["routing_mutations"] is False
-    assert len(capabilities["data"]["failure_classes"]) == 8
+    assert capabilities["data"]["phase"] == "rules-only-prototype"
+    assert capabilities["data"]["features"]["routing_mutations"] is True
+    assert capabilities["data"]["failure_classes"] == [
+        "HEALTHY",
+        "INSTANCE_DOWN",
+        "ROUTE_INSTANCE_FAILURE",
+        "SHARED_ROUTE_FAILURE",
+        "UNKNOWN",
+    ]
+    assert "HAProxy Runtime API" in capabilities["data"]["authority"]["api_process_excludes"]
 
     _, projects = client.request("GET", "/api/v1/projects?limit=1")
     assert len(projects["data"]) == 1
@@ -389,7 +398,7 @@ def main() -> int:
         headers={"X-CSRF-Token": csrf, "Origin": ORIGIN},
     )
     client.request("GET", "/api/v1/auth/me", expected=401)
-    print("Phase 2 API, session, scope, idempotency, persistence, and isolation checks passed.")
+    print("Rules-only API, session, scope, idempotency, SSE, persistence, and isolation checks passed.")
     return 0
 
 

@@ -1,29 +1,32 @@
 export type ConsoleRoute = {
   path: string;
   label: string;
-  group: "COMMAND" | "TRAFFIC" | "RESPONSE" | "EVIDENCE" | "RESEARCH LAB" | "CONFIGURATION";
+  group: "OVERVIEW" | "TRAFFIC" | "INCIDENTS" | "ACTIONS" | "RECOVERY" | "LAB" | "SYSTEM" | "CONTEXT";
   icon: string;
   capability?: "lab";
   mobile?: boolean;
+  primary?: boolean;
 };
 
+export const primaryNavGroups = ["OVERVIEW", "TRAFFIC", "INCIDENTS", "ACTIONS", "RECOVERY", "LAB", "SYSTEM"] as const;
+
 export const consoleRoutes: ConsoleRoute[] = [
-  { path: "/app", label: "Command Center", group: "COMMAND", icon: "command", mobile: true },
-  { path: "/app/traffic/topology", label: "Live Topology", group: "TRAFFIC", icon: "topology" },
-  { path: "/app/traffic/matrix", label: "Route Matrix", group: "TRAFFIC", icon: "matrix" },
-  { path: "/app/traffic/analysis", label: "Traffic Analysis", group: "TRAFFIC", icon: "traffic" },
-  { path: "/app/backends", label: "Backends", group: "TRAFFIC", icon: "backends" },
-  { path: "/app/incidents", label: "Incidents", group: "RESPONSE", icon: "incidents", mobile: true },
-  { path: "/app/actions", label: "Healing Actions", group: "RESPONSE", icon: "actions" },
-  { path: "/app/reintegration", label: "Reintegration", group: "RESPONSE", icon: "reintegrate" },
-  { path: "/app/versions", label: "Version Health", group: "RESPONSE", icon: "versions" },
-  { path: "/app/metrics", label: "Metrics", group: "EVIDENCE", icon: "metrics" },
-  { path: "/app/logs", label: "Logs", group: "EVIDENCE", icon: "logs" },
-  { path: "/app/lab/faults", label: "Fault Lab", group: "RESEARCH LAB", icon: "faults", capability: "lab" },
-  { path: "/app/lab/experiments", label: "Experiments", group: "RESEARCH LAB", icon: "experiments", capability: "lab" },
-  { path: "/app/lab/baselines", label: "Baseline Comparison", group: "RESEARCH LAB", icon: "baselines", capability: "lab" },
-  { path: "/app/policies", label: "Routing Policies", group: "CONFIGURATION", icon: "policies" },
-  { path: "/app/settings", label: "Settings", group: "CONFIGURATION", icon: "settings" },
+  { path: "/app", label: "Overview", group: "OVERVIEW", icon: "command", mobile: true, primary: true },
+  { path: "/app/traffic/matrix", label: "Traffic", group: "TRAFFIC", icon: "matrix", primary: true },
+  { path: "/app/traffic/topology", label: "Topology", group: "CONTEXT", icon: "topology" },
+  { path: "/app/backends", label: "Backends", group: "CONTEXT", icon: "backends" },
+  { path: "/app/traffic/analysis", label: "Analysis", group: "CONTEXT", icon: "traffic" },
+  { path: "/app/incidents", label: "Incidents", group: "INCIDENTS", icon: "incidents", mobile: true, primary: true },
+  { path: "/app/actions", label: "Actions", group: "ACTIONS", icon: "actions", primary: true },
+  { path: "/app/reintegration", label: "Recovery", group: "RECOVERY", icon: "reintegrate", primary: true },
+  { path: "/app/lab/faults", label: "Lab", group: "LAB", icon: "faults", capability: "lab", primary: true },
+  { path: "/app/settings", label: "System", group: "SYSTEM", icon: "settings", primary: true },
+  { path: "/app/policies", label: "Policies", group: "CONTEXT", icon: "policies" },
+  { path: "/app/versions", label: "Version Health", group: "CONTEXT", icon: "versions" },
+  { path: "/app/metrics", label: "Metrics", group: "CONTEXT", icon: "metrics" },
+  { path: "/app/logs", label: "Logs", group: "CONTEXT", icon: "logs" },
+  { path: "/app/lab/experiments", label: "Experiments", group: "CONTEXT", icon: "experiments", capability: "lab" },
+  { path: "/app/lab/baselines", label: "Baseline Comparison", group: "CONTEXT", icon: "baselines", capability: "lab" },
 ];
 
 export const staticConsoleSlugs = [

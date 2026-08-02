@@ -11,7 +11,7 @@ from sqlalchemy import text
 from shlb_api.audit import publish_pending_outbox
 from shlb_api.database import get_session_factory
 from shlb_api.problem import ApiProblem, install_problem_handlers, problem_payload
-from shlb_api.routers import auth, events, projects, registry, system
+from shlb_api.routers import auth, events, operations, projects, registry, system
 from shlb_api.runtime import get_redis
 from shlb_api.settings import get_settings
 
@@ -32,10 +32,11 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Self Healing Load Balancer Control API",
-    version="2.0.0-foundation",
+    version="0.3.0-rules-only-prototype",
     description=(
-        "Phase 2 identity, registry, policy, audit, idempotency, and event contracts. "
-        "This process has no HAProxy or host actuation authority."
+        "Authenticated read and command API for the local rules-only prototype. "
+        "This process deliberately has no HAProxy Runtime or host actuation authority; "
+        "the separately deployed sole-writer worker owns observation and mutation."
     ),
     docs_url="/api/v1/docs",
     redoc_url=None,
@@ -83,3 +84,4 @@ app.include_router(auth.router)
 app.include_router(projects.router)
 app.include_router(registry.router)
 app.include_router(events.router)
+app.include_router(operations.router)

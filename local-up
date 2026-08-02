@@ -1,0 +1,21 @@
+#!/bin/sh
+set -eu
+
+project_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+. "$project_dir/scripts/local-lib.sh"
+cd "$project_dir"
+
+./scripts/init_phase2_secrets.sh
+lan_ip=$(prepare_local_environment)
+certificate_has_lan_ip=false
+if [ -s .local-certs/lab.crt ] && openssl x509 -in .local-certs/lab.crt -noout -text 2>/dev/null | grep -Fq "IP Address:$lan_ip"; then
+    certificate_has_lan_ip=true
+fi
+if [ ! -s .local-certs/lab.crt ] || [ ! -s .local-certs/lab.key ] || [ "$certificate_has_lan_ip" != true ]; then
+    generate_certificate "$lan_ip"
+fi
+docker compose up -d --build
+wait_for_stack
+printf '\nLocal LAB is ready: https://%s:8443\n' "$lan_ip"
+printf 'Login: researcher@shlb.local (password stored in .secrets/bootstrap_password)\n'
+printf 'The password is intentionally not printed. Run ./local-status for health.\n'

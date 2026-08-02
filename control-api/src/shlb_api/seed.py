@@ -11,6 +11,7 @@ from shlb_api.models import (
     AuditEvent,
     BackendInstance,
     DeploymentVersion,
+    DesiredRouteState,
     Environment,
     Project,
     RetryPolicy,
@@ -29,6 +30,7 @@ from shlb_api.settings import get_settings
 
 IDS = {
     "user": uuid.UUID("10000000-0000-4000-8000-000000000001"),
+    "researcher": uuid.UUID("10000000-0000-4000-8000-000000000002"),
     "team": uuid.UUID("20000000-0000-4000-8000-000000000001"),
     "project": uuid.UUID("30000000-0000-4000-8000-000000000001"),
     "environment": uuid.UUID("40000000-0000-4000-8000-000000000001"),
@@ -75,6 +77,16 @@ def seed() -> None:
             )
             db.add(user)
 
+        researcher = db.get(User, IDS["researcher"])
+        if researcher is None:
+            researcher = User(
+                id=IDS["researcher"],
+                email_normalized="researcher@shlb.local",
+                password_hash=hash_password(settings.bootstrap_password),
+                status="ACTIVE",
+            )
+            db.add(researcher)
+
         team = db.get(Team, IDS["team"])
         if team is None:
             team = Team(id=IDS["team"], name="Local reliability team", slug="local-reliability")
@@ -102,6 +114,21 @@ def seed() -> None:
                     team_id=team.id,
                     user_id=user.id,
                     role="PROJECT_ADMIN",
+                )
+            )
+
+        researcher_membership = db.scalar(
+            select(TeamMembership).where(
+                TeamMembership.team_id == team.id,
+                TeamMembership.user_id == researcher.id,
+            )
+        )
+        if researcher_membership is None:
+            db.add(
+                TeamMembership(
+                    team_id=team.id,
+                    user_id=researcher.id,
+                    role="RESEARCHER",
                 )
             )
 
@@ -135,12 +162,14 @@ def seed() -> None:
                 project_id=project.id,
                 name="Local traffic lab",
                 kind="LAB",
-                mode="OBSERVE_ONLY",
+                mode="RULES_ONLY",
                 timezone="Asia/Kolkata",
                 automation_frozen=False,
                 controller_generation=0,
             )
             db.add(environment)
+        else:
+            environment.mode = "RULES_ONLY"
         db.flush()
 
         service = db.get(Service, IDS["service"])
@@ -223,6 +252,25 @@ def seed() -> None:
                             status="ACTIVE",
                         )
                     )
+        db.flush()
+
+        for route_index, _route_key in enumerate(route_specs, start=1):
+            for instance_index, _stable_name in enumerate(INSTANCE_IDS, start=1):
+                membership_identifier = membership_id(route_index, instance_index)
+                desired = db.scalar(
+                    select(DesiredRouteState).where(DesiredRouteState.membership_id == membership_identifier)
+                )
+                if desired is None:
+                    db.add(
+                        DesiredRouteState(
+                            environment_id=environment.id,
+                            membership_id=membership_identifier,
+                            admin_state="ready",
+                            weight=100,
+                            controller_generation=environment.controller_generation,
+                            source_action_id=None,
+                        )
+                    )
 
         if db.get(RoutingPolicy, IDS["routing_policy"]) is None:
             db.add(
@@ -236,12 +284,13 @@ def seed() -> None:
                     verification_settings={
                         "affected_effect_required": True,
                         "unaffected_preservation_required": True,
-                        "minimum_real_samples": 30,
-                        "deadline_seconds": 120,
+                        "minimum_real_samples": 12,
+                        "deadline_seconds": 45,
                     },
                     reintegration_settings={
                         "stages": [5, 20, 50, 100],
-                        "cooldown_seconds": 60,
+                        "cooldown_seconds": 3,
+                        "minimum_stage_samples": {"5": 2, "20": 4, "50": 6, "100": 8},
                         "maximum_flaps": 2,
                     },
                     action_allowlist=[
@@ -254,6 +303,22 @@ def seed() -> None:
                     active=True,
                 )
             )
+        else:
+            policy = db.get(RoutingPolicy, IDS["routing_policy"])
+            policy.verification_settings = {
+                "profile": "LAB_DEMO_V1",
+                "affected_effect_required": True,
+                "unaffected_preservation_required": True,
+                "minimum_real_samples": 12,
+                "deadline_seconds": 45,
+            }
+            policy.reintegration_settings = {
+                "profile": "LAB_DEMO_V1",
+                "stages": [5, 20, 50, 100],
+                "cooldown_seconds": 3,
+                "minimum_stage_samples": {"5": 2, "20": 4, "50": 6, "100": 8},
+                "maximum_flaps": 2,
+            }
 
         for route_index, route_key in enumerate(route_specs, start=1):
             identifier = retry_policy_id(route_index)
