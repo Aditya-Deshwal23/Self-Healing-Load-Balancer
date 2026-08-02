@@ -153,7 +153,7 @@ Authenticated reads include:
 
 LAB fault create/clear mutations require authentication, an authorized role, CSRF, an allowed Origin and an idempotency key; clear also requires `If-Match`. Errors use `application/problem+json`, writes create structured audit/outbox records, and project-scope denials intentionally look like `404`.
 
-SSE publishes incident, classification, action, verification, reintegration, rollback, resolution, safe-mode and drift transitions. `Last-Event-ID` is mapped through bounded Redis cursor keys; an expired cursor produces `resync_required` so the client can refetch authorized REST state.
+SSE publishes incident, classification, action, verification, reintegration, rollback, resolution and drift transitions. `Last-Event-ID` is mapped through bounded Redis cursor keys; an expired cursor produces `resync_required` so the client can refetch authorized REST state. `safe_mode_changed` remains reserved until an operator Safe Mode mutation is implemented; the prototype does not emit a decorative event for a transition it cannot perform.
 
 ## Operator console
 
