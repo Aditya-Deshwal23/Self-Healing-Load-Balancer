@@ -39,16 +39,13 @@ from shlb_api.runtime import get_redis
 from shlb_api.security import canonical_hash
 from shlb_api.seed import IDS, INSTANCE_IDS, ROUTE_IDS
 from shlb_api.worker_io import HAProxyRuntime, HAProxyRuntimeError, LabProbeClient, PrometheusEvidence
-from shlb_api.worker_policy import INSTANCES, ROUTES, RuleDecision, classify, instance_capacity, route_instance_capacity
+from shlb_api.worker_policy import INSTANCES, LAB_POLICY, ROUTES, RuleDecision, classify, instance_capacity, route_instance_capacity
 
 
-LOOP_SECONDS = 2.0
-WINDOW_SECONDS = 12
 WORKER_LOCK_ID = 0x53484C42
 TERMINAL_ACTIONS = {"COMMITTED", "ROLLED_BACK", "ROLLBACK_FAILED", "FAILED", "NEEDS_REVIEW", "RESULT_UNKNOWN"}
 TERMINAL_FAULTS = {"CLEARED", "EXPIRED", "FAILED"}
 ACTIVE_INCIDENTS = {"OPEN", "MITIGATING", "VERIFYING", "RECOVERING", "NEEDS_REVIEW"}
-STAGES = (("PROBING", None, 3), ("5%", 5, 2), ("20%", 20, 4), ("50%", 50, 6), ("100%", 100, 8), ("HEALTHY", 100, 1))
 
 
 class ControlWorker:
@@ -76,7 +73,7 @@ class ControlWorker:
             except Exception as exc:  # bounded loop survives dependency interruptions
                 print(json.dumps({"event": "worker_iteration_failed", "error_type": type(exc).__name__, "detail": str(exc)[:300]}, separators=(",", ":")), flush=True)
             elapsed = time.monotonic() - started
-            time.sleep(max(0.1, LOOP_SECONDS - elapsed))
+            time.sleep(max(0.1, LAB_POLICY.loop_seconds - elapsed))
 
     def _acquire_authority(self) -> None:
         self.lock_connection = get_engine().connect()
@@ -102,7 +99,7 @@ class ControlWorker:
             self.generation_id = generation.id
 
     def _acquire_lease(self) -> None:
-        if not self.redis.set("worker:authority:lease", self.worker_id, nx=True, ex=10):
+        if not self.redis.set("worker:authority:lease", self.worker_id, nx=True, ex=LAB_POLICY.worker_lease_seconds):
             existing = self.redis.get("worker:authority:lease")
             if existing != self.worker_id:
                 raise RuntimeError("another worker holds the Redis coordination lease")
@@ -110,7 +107,7 @@ class ControlWorker:
     def _refresh_lease(self) -> bool:
         if self.redis.get("worker:authority:lease") != self.worker_id:
             return False
-        self.redis.expire("worker:authority:lease", 10)
+        self.redis.expire("worker:authority:lease", LAB_POLICY.worker_lease_seconds)
         return True
 
     def tick(self) -> None:
@@ -241,7 +238,7 @@ class ControlWorker:
                 self._commit_publish(db)
 
     def _observe(self) -> tuple[ObservationWindow, ObservedStateSnapshot, dict, dict, list[dict]]:
-        evidence = self.prometheus.collect(f"{WINDOW_SECONDS}s")
+        evidence = self.prometheus.collect(f"{LAB_POLICY.observation_window_seconds}s")
         probes = self.probes.probes()
         memberships = self.runtime.memberships()
         info = self.runtime.info()
@@ -257,14 +254,14 @@ class ControlWorker:
             route_capacity[route] = round(sum(capacities.get(instance, 0) for instance in eligible) / sum(capacities.values()) * 100, 1)
         metrics = {
             "summary": {
-                "admitted_rps": round(total_samples / WINDOW_SECONDS, 1),
+                "admitted_rps": round(total_samples / LAB_POLICY.observation_window_seconds, 1),
                 "success_ratio": round((total_samples - total_errors) / total_samples, 4) if total_samples else None,
                 "healthy_capacity_percent": min(route_capacity.values()) if route_capacity else None,
                 "route_capacity_percent": route_capacity,
             },
             "memberships": evidence,
         }
-        window = ObservationWindow(environment_id=IDS["environment"], started_at=now - timedelta(seconds=WINDOW_SECONDS), ended_at=now, completeness=completeness, metrics=metrics, probes=probes, freshness={"prometheus_seconds": 2, "runtime_seconds": 0, "probe_seconds": 0}, conflicts=[])
+        window = ObservationWindow(environment_id=IDS["environment"], started_at=now - timedelta(seconds=LAB_POLICY.observation_window_seconds), ended_at=now, completeness=completeness, metrics=metrics, probes=probes, freshness={"prometheus_seconds": LAB_POLICY.loop_seconds, "runtime_seconds": 0, "probe_seconds": 0}, conflicts=[])
         snapshot = ObservedStateSnapshot(environment_id=IDS["environment"], action_id=None, source="HAPROXY_RUNTIME", process_id=info.get("Pid"), config_identifier=info.get("Config hash") or info.get("Release_date"), observed_at=now, memberships=memberships)
         with self.sessions() as db:
             db.add_all([window, snapshot])
@@ -302,7 +299,7 @@ class ControlWorker:
         candidates = [{"unit": "NO_ACTION", "result": "selected", "reason": "UNKNOWN/shared scope cannot actuate"}]
         if decision.final_class == "ROUTE_INSTANCE_FAILURE":
             queues = {item["server"].removeprefix("srv_").replace("_", "-"): item["queue"] for item in self.runtime.memberships() if item["backend"] == "be_checkout"}
-            safety = route_instance_capacity(capacities={key: 100 for key in INSTANCES}, target_instance="inst-b", queues=queues, minimum_reserve_percent=50)
+            safety = route_instance_capacity(capacities={key: 100 for key in INSTANCES}, target_instance="inst-b", queues=queues, minimum_reserve_percent=LAB_POLICY.minimum_physical_reserve_percent)
             candidates = [
                 {"unit": "ROUTE_INSTANCE", "targets": ["be_checkout/srv_inst_b"], "result": "selected" if safety["allowed"] else "rejected", "reason": "smallest supported scope" if safety["allowed"] else "capacity or queue guard failed"},
                 {"unit": "INSTANCE", "targets": ["all inst-b memberships"], "result": "rejected", "reason": "healthy public/auth/catalog memberships would be displaced"},
@@ -318,7 +315,7 @@ class ControlWorker:
                 }
                 for route in ROUTES
             }
-            safety = instance_capacity(capacities={key: 100 for key in INSTANCES}, target_instance="inst-b", route_peer_queues=route_peer_queues, minimum_reserve_percent=50)
+            safety = instance_capacity(capacities={key: 100 for key in INSTANCES}, target_instance="inst-b", route_peer_queues=route_peer_queues, minimum_reserve_percent=LAB_POLICY.minimum_physical_reserve_percent)
             candidates = [
                 {"unit": "INSTANCE", "targets": [f"be_{route}/srv_inst_b" for route in ROUTES], "result": "selected" if safety["allowed"] else "rejected", "reason": "all routes and direct probes support instance scope" if safety["allowed"] else "physical reserve or peer queue guard failed"},
                 {"unit": "ROUTE_INSTANCE", "result": "rejected", "reason": "failure spans all registered routes on inst-b"},
@@ -349,7 +346,7 @@ class ControlWorker:
         if desired is None:
             raise RuntimeError("durable desired state is missing")
         now = utc_now()
-        action = Action(environment_id=incident.environment_id, incident_id=incident.id, evidence_certificate_id=certificate.id, membership_id=membership.id, action_kind="ROUTE_MEMBERSHIP_QUARANTINE", lifecycle="PREPARED", controller_generation=self.generation, haproxy_backend=membership.haproxy_backend, haproxy_server=membership.haproxy_server, previous_desired={"admin_state": desired.admin_state, "weight": desired.weight}, previous_observed=before, requested_state={"admin_state": "drain", "weight": 0}, expected_effect="Remove only checkout/inst-b from eligible checkout selections while preserving inst-b public/auth/catalog.", preservation_set=["be_public/srv_inst_b", "be_auth/srv_inst_b", "be_catalog/srv_inst_b", "be_checkout/srv_inst_a", "be_checkout/srv_inst_c"], verification_criteria={"checkout_error_rate_max": 0.1, "minimum_real_samples": 12, "peer_queue_max": 5, "preserved_error_rate_max": 0.1}, rollback_strategy={"admin_state": desired.admin_state, "weight": desired.weight, "trigger": ["INEFFECTIVE", "HARMFUL", "READBACK_MISMATCH"]}, idempotency_key=f"controller-g{self.generation}:{incident.id}:checkout-inst-b", expires_at=now + timedelta(minutes=10))
+        action = Action(environment_id=incident.environment_id, incident_id=incident.id, evidence_certificate_id=certificate.id, membership_id=membership.id, action_kind="ROUTE_MEMBERSHIP_QUARANTINE", lifecycle="PREPARED", controller_generation=self.generation, haproxy_backend=membership.haproxy_backend, haproxy_server=membership.haproxy_server, previous_desired={"admin_state": desired.admin_state, "weight": desired.weight}, previous_observed=before, requested_state={"admin_state": "drain", "weight": 0}, expected_effect="Remove only checkout/inst-b from eligible checkout selections while preserving inst-b public/auth/catalog.", preservation_set=["be_public/srv_inst_b", "be_auth/srv_inst_b", "be_catalog/srv_inst_b", "be_checkout/srv_inst_a", "be_checkout/srv_inst_c"], verification_criteria={"checkout_error_rate_max": LAB_POLICY.healthy_rate, "minimum_real_samples": LAB_POLICY.route_verification_minimum_samples, "peer_queue_max": LAB_POLICY.peer_queue_limit, "preserved_error_rate_max": LAB_POLICY.healthy_rate}, rollback_strategy={"admin_state": desired.admin_state, "weight": desired.weight, "trigger": ["INEFFECTIVE", "HARMFUL", "READBACK_MISMATCH"]}, idempotency_key=f"controller-g{self.generation}:{incident.id}:checkout-inst-b", expires_at=now + timedelta(seconds=LAB_POLICY.action_expiry_seconds))
         db.add(action)
         db.flush()
         desired.admin_state = "drain"
@@ -437,7 +434,7 @@ class ControlWorker:
         peers = sorted(f"{item['backend']}/{item['server']}" for item in memberships if item["server"] != "srv_inst_b")
         now = utc_now()
         representative = targets[0]
-        action = Action(environment_id=incident.environment_id, incident_id=incident.id, evidence_certificate_id=certificate.id, membership_id=representative[2], action_kind="INSTANCE_QUARANTINE", lifecycle="PREPARED", controller_generation=self.generation, haproxy_backend="all_routes", haproxy_server="srv_inst_b", previous_desired={"targets": previous_desired}, previous_observed={"targets": previous_observed}, requested_state={"admin_state": "drain", "weight": 0, "targets": requested_targets}, expected_effect="Remove inst-b from every predeclared route while preserving physical peers inst-a and inst-c.", preservation_set=peers, verification_criteria={"all_routes_success_rate_min": 0.9, "minimum_real_samples_per_route": 6, "peer_queue_max": 5}, rollback_strategy={"targets": previous_desired, "trigger": ["INEFFECTIVE", "HARMFUL", "READBACK_MISMATCH"]}, idempotency_key=f"controller-g{self.generation}:{incident.id}:instance-inst-b", expires_at=now + timedelta(minutes=10))
+        action = Action(environment_id=incident.environment_id, incident_id=incident.id, evidence_certificate_id=certificate.id, membership_id=representative[2], action_kind="INSTANCE_QUARANTINE", lifecycle="PREPARED", controller_generation=self.generation, haproxy_backend="all_routes", haproxy_server="srv_inst_b", previous_desired={"targets": previous_desired}, previous_observed={"targets": previous_observed}, requested_state={"admin_state": "drain", "weight": 0, "targets": requested_targets}, expected_effect="Remove inst-b from every predeclared route while preserving physical peers inst-a and inst-c.", preservation_set=peers, verification_criteria={"all_routes_success_rate_min": 1 - LAB_POLICY.healthy_rate, "minimum_real_samples_per_route": LAB_POLICY.instance_route_minimum_samples, "peer_queue_max": LAB_POLICY.peer_queue_limit}, rollback_strategy={"targets": previous_desired, "trigger": ["INEFFECTIVE", "HARMFUL", "READBACK_MISMATCH"]}, idempotency_key=f"controller-g{self.generation}:{incident.id}:instance-inst-b", expires_at=now + timedelta(seconds=LAB_POLICY.action_expiry_seconds))
         db.add(action)
         db.flush()
         for _, _, membership_id in targets:
@@ -570,24 +567,24 @@ class ControlWorker:
         affected_rate = affected_errors / affected_samples if affected_samples else None
         preserved = {route: evidence[f"{route}/inst-b"] for route in ("public", "auth", "catalog")}
         preservation_samples = sum(item["samples"] for item in preserved.values())
-        preservation_ok = all(item["samples"] >= 3 and item["error_rate"] is not None and item["error_rate"] <= 0.1 for item in preserved.values())
+        preservation_ok = all(item["samples"] >= LAB_POLICY.control_minimum_samples and item["error_rate"] is not None and item["error_rate"] <= LAB_POLICY.healthy_rate for item in preserved.values())
         peer_queues = {item["server"]: item["queue"] for item in memberships if item["backend"] == "be_checkout" and item["server"] != "srv_inst_b"}
-        queue_ok = all(value <= 5 for value in peer_queues.values())
+        queue_ok = all(value <= LAB_POLICY.peer_queue_limit for value in peer_queues.values())
         target = next((item for item in memberships if item["backend"] == action.haproxy_backend and item["server"] == action.haproxy_server), {})
         aligned = target.get("admin_state") == "drain" and target.get("weight") == 0
-        affected_ok = affected_samples >= 12 and affected_rate is not None and affected_rate <= 0.1
+        affected_ok = affected_samples >= LAB_POLICY.route_verification_minimum_samples and affected_rate is not None and affected_rate <= LAB_POLICY.healthy_rate
         elapsed = (utc_now() - action.created_at).total_seconds()
-        harmful = (not queue_ok and any(value > 10 for value in peer_queues.values())) or any(item["samples"] >= 3 and item["error_rate"] is not None and item["error_rate"] > 0.25 for item in preserved.values())
+        harmful = (not queue_ok and any(value > LAB_POLICY.harmful_queue_limit for value in peer_queues.values())) or any(item["samples"] >= LAB_POLICY.control_minimum_samples and item["error_rate"] is not None and item["error_rate"] > LAB_POLICY.harmful_error_rate for item in preserved.values())
         if harmful:
             result = "HARMFUL"
         elif affected_ok and preservation_ok and queue_ok and aligned:
             result = "EFFECTIVE"
-        elif elapsed >= 45 and affected_samples >= 12:
+        elif elapsed >= LAB_POLICY.verification_timeout_seconds and affected_samples >= LAB_POLICY.route_verification_minimum_samples:
             result = "INEFFECTIVE"
         else:
             result = "INSUFFICIENT_EVIDENCE"
         revision = (db.scalar(select(func.max(VerificationResult.revision)).where(VerificationResult.action_id == action.id)) or 0) + 1
-        verification = VerificationResult(action_id=action.id, revision=revision, result=result, affected_obligation={"passed": affected_ok, "error_rate": round(affected_rate, 4) if affected_rate is not None else None, "sample_count": affected_samples, "maximum_error_rate": 0.1}, preservation_obligation={"passed": preservation_ok and queue_ok and aligned, "routes": preserved, "peer_queues": peer_queues, "queue_limit": 5, "desired_observed_aligned": aligned, "retry_amplification": 1.0}, sample_count=affected_samples + preservation_samples, started_at=action.created_at, completed_at=utc_now() if result != "INSUFFICIENT_EVIDENCE" else None)
+        verification = VerificationResult(action_id=action.id, revision=revision, result=result, affected_obligation={"passed": affected_ok, "error_rate": round(affected_rate, 4) if affected_rate is not None else None, "sample_count": affected_samples, "maximum_error_rate": LAB_POLICY.healthy_rate}, preservation_obligation={"passed": preservation_ok and queue_ok and aligned, "routes": preserved, "peer_queues": peer_queues, "queue_limit": LAB_POLICY.peer_queue_limit, "desired_observed_aligned": aligned, "retry_amplification": 1.0}, sample_count=affected_samples + preservation_samples, started_at=action.created_at, completed_at=utc_now() if result != "INSUFFICIENT_EVIDENCE" else None)
         db.add(verification)
         db.flush()
         if result == "EFFECTIVE":
@@ -616,19 +613,19 @@ class ControlWorker:
             samples = sum(item["samples"] for item in peers)
             errors = sum(item["errors"] for item in peers)
             rate = errors / samples if samples else None
-            route_results[route] = {"samples": samples, "errors": errors, "error_rate": round(rate, 4) if rate is not None else None, "passed": samples >= 6 and rate is not None and rate <= 0.1}
+            route_results[route] = {"samples": samples, "errors": errors, "error_rate": round(rate, 4) if rate is not None else None, "passed": samples >= LAB_POLICY.instance_route_minimum_samples and rate is not None and rate <= LAB_POLICY.healthy_rate}
         target_rows = [item for item in memberships if item["server"] == "srv_inst_b"]
         peer_rows = [item for item in memberships if item["server"] != "srv_inst_b"]
         aligned = len(target_rows) == len(ROUTES) and all(item["admin_state"] == "drain" and item["weight"] == 0 for item in target_rows)
-        queue_ok = all(item["queue"] <= 5 for item in peer_rows)
+        queue_ok = all(item["queue"] <= LAB_POLICY.peer_queue_limit for item in peer_rows)
         affected_ok = all(result["passed"] for result in route_results.values())
-        harmful = any(item["queue"] > 10 for item in peer_rows) or any(result["samples"] >= 3 and result["error_rate"] is not None and result["error_rate"] > 0.25 for result in route_results.values())
+        harmful = any(item["queue"] > LAB_POLICY.harmful_queue_limit for item in peer_rows) or any(result["samples"] >= LAB_POLICY.control_minimum_samples and result["error_rate"] is not None and result["error_rate"] > LAB_POLICY.harmful_error_rate for result in route_results.values())
         elapsed = (utc_now() - action.created_at).total_seconds()
         if harmful:
             result = "HARMFUL"
         elif affected_ok and queue_ok and aligned:
             result = "EFFECTIVE"
-        elif elapsed >= 45 and sum(item["samples"] for item in route_results.values()) >= 24:
+        elif elapsed >= LAB_POLICY.verification_timeout_seconds and sum(item["samples"] for item in route_results.values()) >= LAB_POLICY.instance_route_minimum_samples * len(ROUTES):
             result = "INEFFECTIVE"
         else:
             result = "INSUFFICIENT_EVIDENCE"
@@ -675,12 +672,12 @@ class ControlWorker:
         latest = db.scalar(select(VerificationResult).where(VerificationResult.action_id == action.id).order_by(VerificationResult.revision.desc()).limit(1))
         previous_passes = int((latest.affected_obligation or {}).get("recovery_probe_passes", 0)) if latest else 0
         passes = previous_passes + 1 if probe_ok else 0
-        if passes < 3:
+        if passes < LAB_POLICY.instance_recovery_probe_passes:
             revision = (latest.revision if latest else 0) + 1
-            verification = VerificationResult(action_id=action.id, revision=revision, result="INSUFFICIENT_EVIDENCE", affected_obligation={"recovery_probe_passes": passes, "required": 3, "all_inst_b_routes_healthy": probe_ok}, preservation_obligation={"quarantine_retained": True}, sample_count=passes, started_at=utc_now(), completed_at=None)
+            verification = VerificationResult(action_id=action.id, revision=revision, result="INSUFFICIENT_EVIDENCE", affected_obligation={"recovery_probe_passes": passes, "required": LAB_POLICY.instance_recovery_probe_passes, "all_inst_b_routes_healthy": probe_ok}, preservation_obligation={"quarantine_retained": True}, sample_count=passes, started_at=utc_now(), completed_at=None)
             db.add(verification)
             db.flush()
-            self._event(db, event_type="verification_updated", aggregate_type="verification", aggregate_id=verification.id, aggregate_version=revision, incident_id=action.incident_id, action_id=action.id, data={"result": "INSUFFICIENT_EVIDENCE", "recovery_probe_passes": passes, "required": 3})
+            self._event(db, event_type="verification_updated", aggregate_type="verification", aggregate_id=verification.id, aggregate_version=revision, incident_id=action.incident_id, action_id=action.id, data={"result": "INSUFFICIENT_EVIDENCE", "recovery_probe_passes": passes, "required": LAB_POLICY.instance_recovery_probe_passes})
             self._commit_publish(db)
             return
         targets = action.rollback_strategy.get("targets", {})
@@ -731,10 +728,10 @@ class ControlWorker:
         if existing:
             return
         now = utc_now()
-        run = ReintegrationRun(environment_id=action.environment_id, incident_id=action.incident_id, action_id=action.id, status="ACTIVE", current_stage="PROBING", last_verified_stage="QUARANTINED", retry_count=0, maximum_retries=2, next_transition_at=now, started_at=now)
+        run = ReintegrationRun(environment_id=action.environment_id, incident_id=action.incident_id, action_id=action.id, status="ACTIVE", current_stage="PROBING", last_verified_stage="QUARANTINED", retry_count=0, maximum_retries=LAB_POLICY.maximum_reintegration_retries, next_transition_at=now, started_at=now)
         db.add(run)
         db.flush()
-        for sequence, (name, weight, minimum) in enumerate(STAGES):
+        for sequence, (name, weight, minimum) in enumerate(LAB_POLICY.reintegration_stages):
             db.add(ReintegrationStage(run_id=run.id, sequence=sequence, name=name, requested_weight=weight, observed_weight=0 if name == "PROBING" else None, status="CURRENT" if name == "PROBING" else "PENDING", sample_count=0, minimum_samples=minimum, started_at=now if name == "PROBING" else None, result={}))
         incident = db.get(Incident, action.incident_id)
         incident.status = "RECOVERING"
@@ -787,7 +784,7 @@ class ControlWorker:
                 next_stage.started_at = now
                 next_stage.observed_weight = observed["weight"]
                 run.current_stage = next_stage.name
-                run.next_transition_at = now + timedelta(seconds=3)
+                run.next_transition_at = now + timedelta(seconds=LAB_POLICY.reintegration_cooldown_seconds)
                 run.version += 1
         elif stage.name == "HEALTHY":
             if target_probe.get("application_ok") is True:
@@ -811,8 +808,8 @@ class ControlWorker:
             stage.sample_count = target_evidence["samples"]
             stage.result = {"error_rate": target_evidence["error_rate"], "real_samples": target_evidence["samples"], "direct_probe": target_probe}
             elapsed = (now - stage.started_at).total_seconds() if stage.started_at else 0
-            failed = target_probe.get("application_ok") is not True or (target_evidence["samples"] >= 2 and target_evidence["error_rate"] is not None and target_evidence["error_rate"] > 0.1)
-            timed_out = elapsed > 45 and target_evidence["samples"] < stage.minimum_samples
+            failed = target_probe.get("application_ok") is not True or (target_evidence["samples"] >= 2 and target_evidence["error_rate"] is not None and target_evidence["error_rate"] > LAB_POLICY.healthy_rate)
+            timed_out = elapsed > LAB_POLICY.reintegration_stage_timeout_seconds and target_evidence["samples"] < stage.minimum_samples
             if failed or timed_out:
                 run.retry_count += 1
                 stage.status = "FAILED"
@@ -833,9 +830,9 @@ class ControlWorker:
                     probe_stage.verified_at = None
                     run.current_stage = "PROBING"
                     run.last_verified_stage = "QUARANTINED" if fallback_weight == 0 else run.last_verified_stage
-                    run.next_transition_at = now + timedelta(seconds=3)
+                    run.next_transition_at = now + timedelta(seconds=LAB_POLICY.reintegration_cooldown_seconds)
                 run.version += 1
-            elif elapsed >= 3 and target_evidence["samples"] >= stage.minimum_samples and target_evidence["error_rate"] is not None and target_evidence["error_rate"] <= 0.1:
+            elif elapsed >= LAB_POLICY.reintegration_cooldown_seconds and target_evidence["samples"] >= stage.minimum_samples and target_evidence["error_rate"] is not None and target_evidence["error_rate"] <= LAB_POLICY.healthy_rate:
                 stage.status = "VERIFIED"
                 stage.verified_at = now
                 stage.observed_weight = self.runtime.read(action.haproxy_backend, action.haproxy_server)["weight"]
@@ -849,7 +846,7 @@ class ControlWorker:
                 next_stage.status = "CURRENT"
                 next_stage.started_at = now
                 run.current_stage = next_stage.name
-                run.next_transition_at = now + timedelta(seconds=3)
+                run.next_transition_at = now + timedelta(seconds=LAB_POLICY.reintegration_cooldown_seconds)
                 run.version += 1
         self._event(db, event_type="reintegration_progress", aggregate_type="reintegration", aggregate_id=run.id, aggregate_version=run.version, incident_id=run.incident_id, action_id=run.action_id, data={"status": run.status, "stage": run.current_stage, "last_verified_stage": run.last_verified_stage, "retry_count": run.retry_count, "observed_weight": stage.observed_weight, "sample_count": stage.sample_count, "minimum_samples": stage.minimum_samples})
         self._commit_publish(db)
@@ -868,7 +865,7 @@ class ControlWorker:
             matching.started_at = utc_now()
             matching.observed_weight = observed.get("weight")
             run.current_stage = matching.name
-            run.next_transition_at = utc_now() + timedelta(seconds=3)
+            run.next_transition_at = utc_now() + timedelta(seconds=LAB_POLICY.reintegration_cooldown_seconds)
             run.version += 1
             self._event(db, event_type="reintegration_progress", aggregate_type="reintegration", aggregate_id=run.id, aggregate_version=run.version, incident_id=run.incident_id, action_id=run.action_id, data={"status": run.status, "stage": matching.name, "restart_reconciliation": True, "blind_retry": False, "observed_weight": observed.get("weight")})
         else:

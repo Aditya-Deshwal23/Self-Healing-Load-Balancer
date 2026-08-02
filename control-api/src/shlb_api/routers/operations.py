@@ -36,6 +36,7 @@ from shlb_api.models import (
 )
 from shlb_api.problem import ApiProblem
 from shlb_api.schemas import LabFaultCreate
+from shlb_api.worker_policy import LAB_POLICY
 
 router = APIRouter(prefix="/api/v1", tags=["operations"])
 LAB_ROLES = {"RESEARCHER", "PROJECT_ADMIN", "SYSTEM_ADMIN"}
@@ -338,4 +339,4 @@ def clear_fault(fault_id: uuid.UUID, request: Request, response: Response, idemp
 def worker_status(environment_id: uuid.UUID, request: Request, auth: AuthContext = Depends(get_auth_context), db: Session = Depends(get_db)):
     require_environment(db, auth, environment_id)
     row = db.scalar(select(ControllerGeneration).where(ControllerGeneration.environment_id == environment_id).order_by(ControllerGeneration.generation.desc()).limit(1))
-    return resource_envelope(request, {"status": row.status if row else "NOT_STARTED", "generation": row.generation if row else None, "worker_id": row.worker_id if row else None, "started_at": isoformat(row.started_at) if row else None, "last_heartbeat_at": isoformat(row.last_heartbeat_at) if row else None, "stale": (utc_now() - row.last_heartbeat_at).total_seconds() > 10 if row else True})
+    return resource_envelope(request, {"status": row.status if row else "NOT_STARTED", "generation": row.generation if row else None, "worker_id": row.worker_id if row else None, "started_at": isoformat(row.started_at) if row else None, "last_heartbeat_at": isoformat(row.last_heartbeat_at) if row else None, "stale": (utc_now() - row.last_heartbeat_at).total_seconds() > LAB_POLICY.heartbeat_stale_seconds if row else True})

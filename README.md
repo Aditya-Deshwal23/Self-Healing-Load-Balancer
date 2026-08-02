@@ -119,6 +119,8 @@ Network boundaries are intentional:
 
 Default memory limits total roughly 2.1 GiB across the eleven containers. Prometheus retention is capped at two hours/256 MB, JSON logs rotate, the worker is single-threaded and non-overlapping, database pools and probe/request timeouts are bounded, and the traffic source is capped at 40 requests per second.
 
+All accelerated demonstration thresholds and timings—including evidence windows, leases, verification timeouts, queue bounds, action expiry, stage cooldowns, stage samples and retry limits—live in the single immutable `LAB_POLICY` in `worker_policy.py`; the control loop does not scatter sleep constants across workflows.
+
 ## Durable operational model
 
 Alembic migration `20260802_0002_vertical_slice.py` adds:

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from shlb_api.worker_policy import INSTANCES, ROUTES, classify, instance_capacity, route_instance_capacity
+from shlb_api.worker_policy import INSTANCES, LAB_POLICY, ROUTES, classify, instance_capacity, route_instance_capacity
 
 
 def evidence(*, failing: set[tuple[str, str]] | None = None, samples: int = 12) -> dict[str, dict]:
@@ -34,6 +34,21 @@ def test_healthy_requires_every_membership_and_probe() -> None:
     decision = classify(evidence(), probes(), [])
     assert decision.final_class == "HEALTHY"
     assert decision.actionable is False
+
+
+def test_accelerated_lab_timings_are_centralized_and_bounded() -> None:
+    assert LAB_POLICY.observation_window_seconds == 12
+    assert LAB_POLICY.reintegration_cooldown_seconds == 3
+    assert [stage[0] for stage in LAB_POLICY.reintegration_stages] == [
+        "PROBING",
+        "5%",
+        "20%",
+        "50%",
+        "100%",
+        "HEALTHY",
+    ]
+    assert LAB_POLICY.maximum_reintegration_retries == 2
+    assert LAB_POLICY.peer_queue_limit < LAB_POLICY.harmful_queue_limit
 
 
 def test_route_instance_requires_healthy_route_peers_and_instance_siblings() -> None:

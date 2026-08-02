@@ -5,10 +5,47 @@ from dataclasses import dataclass
 
 ROUTES = ("public", "auth", "catalog", "checkout")
 INSTANCES = ("inst-a", "inst-b", "inst-c")
-FAILURE_RATE = 0.5
-HEALTHY_RATE = 0.1
-TARGET_MINIMUM_SAMPLES = 6
-CONTROL_MINIMUM_SAMPLES = 3
+
+
+@dataclass(frozen=True)
+class LabControlPolicy:
+    """All accelerated prototype thresholds and timings in one explicit policy."""
+
+    loop_seconds: float = 2.0
+    observation_window_seconds: int = 12
+    worker_lease_seconds: int = 10
+    heartbeat_stale_seconds: int = 10
+    failure_rate: float = 0.5
+    healthy_rate: float = 0.1
+    harmful_error_rate: float = 0.25
+    target_minimum_samples: int = 6
+    control_minimum_samples: int = 3
+    route_verification_minimum_samples: int = 12
+    instance_route_minimum_samples: int = 6
+    peer_queue_limit: int = 5
+    harmful_queue_limit: int = 10
+    minimum_physical_reserve_percent: int = 50
+    action_expiry_seconds: int = 600
+    verification_timeout_seconds: int = 45
+    reintegration_cooldown_seconds: int = 3
+    reintegration_stage_timeout_seconds: int = 45
+    maximum_reintegration_retries: int = 2
+    instance_recovery_probe_passes: int = 3
+    reintegration_stages: tuple[tuple[str, int | None, int], ...] = (
+        ("PROBING", None, 3),
+        ("5%", 5, 2),
+        ("20%", 20, 4),
+        ("50%", 50, 6),
+        ("100%", 100, 8),
+        ("HEALTHY", 100, 1),
+    )
+
+
+LAB_POLICY = LabControlPolicy()
+FAILURE_RATE = LAB_POLICY.failure_rate
+HEALTHY_RATE = LAB_POLICY.healthy_rate
+TARGET_MINIMUM_SAMPLES = LAB_POLICY.target_minimum_samples
+CONTROL_MINIMUM_SAMPLES = LAB_POLICY.control_minimum_samples
 
 
 @dataclass(frozen=True)
@@ -104,7 +141,7 @@ def route_instance_capacity(*, capacities: dict[str, int], target_instance: str,
     remaining = sum(value for instance, value in capacities.items() if instance != target_instance)
     remaining_percent = (remaining / total * 100) if total else 0
     peer_queues = {instance: queues.get(instance, 0) for instance in capacities if instance != target_instance}
-    allowed = bool(total) and remaining_percent >= minimum_reserve_percent and all(value <= 5 for value in peer_queues.values())
+    allowed = bool(total) and remaining_percent >= minimum_reserve_percent and all(value <= LAB_POLICY.peer_queue_limit for value in peer_queues.values())
     return {
         "allowed": allowed,
         "capacity_semantics": "unique physical instances",
@@ -113,7 +150,7 @@ def route_instance_capacity(*, capacities: dict[str, int], target_instance: str,
         "remaining_percent": round(remaining_percent, 1),
         "minimum_reserve_percent": minimum_reserve_percent,
         "peer_queues": peer_queues,
-        "queue_limit": 5,
+        "queue_limit": LAB_POLICY.peer_queue_limit,
     }
 
 
@@ -127,7 +164,7 @@ def instance_capacity(*, capacities: dict[str, int], target_instance: str, route
         for route, queues in route_peer_queues.items()
     }
     all_routes_have_two_peers = all(len(queues) == len(capacities) - 1 for queues in bounded_queues.values())
-    queues_safe = all(value <= 5 for queues in bounded_queues.values() for value in queues.values())
+    queues_safe = all(value <= LAB_POLICY.peer_queue_limit for queues in bounded_queues.values() for value in queues.values())
     allowed = bool(total) and remaining_percent >= minimum_reserve_percent and all_routes_have_two_peers and queues_safe
     return {
         "allowed": allowed,
@@ -138,5 +175,5 @@ def instance_capacity(*, capacities: dict[str, int], target_instance: str, route
         "minimum_reserve_percent": minimum_reserve_percent,
         "route_peer_queues": bounded_queues,
         "all_routes_have_two_peers": all_routes_have_two_peers,
-        "queue_limit": 5,
+        "queue_limit": LAB_POLICY.peer_queue_limit,
     }

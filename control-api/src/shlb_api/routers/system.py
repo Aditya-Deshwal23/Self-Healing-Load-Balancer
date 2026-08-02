@@ -22,6 +22,7 @@ from shlb_api.models import (
 )
 from shlb_api.problem import ApiProblem
 from shlb_api.runtime import get_redis
+from shlb_api.worker_policy import LAB_POLICY
 
 router = APIRouter(tags=["system"])
 
@@ -107,7 +108,7 @@ def system_status(
         .order_by(ObservedStateSnapshot.observed_at.desc())
         .limit(1)
     )
-    worker_fresh = bool(generation and generation.status == "ACTIVE" and (utc_now() - generation.last_heartbeat_at).total_seconds() <= 10)
+    worker_fresh = bool(generation and generation.status == "ACTIVE" and (utc_now() - generation.last_heartbeat_at).total_seconds() <= LAB_POLICY.heartbeat_stale_seconds)
     return resource_envelope(
         request,
         {
