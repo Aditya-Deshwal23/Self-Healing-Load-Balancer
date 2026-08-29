@@ -1,0 +1,11 @@
+sequenceDiagram
+    participant Client
+    participant NGINX
+    participant HAProxy
+    participant Backend as Healthy backend
+    Client->>NGINX: HTTPS request
+    NGINX->>HAProxy: Forward application route
+    HAProxy->>Backend: Choose healthy member
+    Backend-->>HAProxy: Response
+    HAProxy-->>NGINX: Response
+    NGINX-->>Client: Response

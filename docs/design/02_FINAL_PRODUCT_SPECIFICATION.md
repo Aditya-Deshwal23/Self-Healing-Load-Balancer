@@ -157,6 +157,7 @@ The exact MVP includes:
 8. An operator override wins over overlapping automation until it expires or is explicitly released.
 9. One environment has one physical Runtime API writer in MVP.
 
+
 ## 12. Customer integration requirements
 
 | Requirement | Why it is required | Degraded mode if absent |
@@ -166,6 +167,7 @@ The exact MVP includes:
 | Backend IP/port allowlist | safe registration and direct probing | manual registration only |
 | Version label per instance | cohort comparison | no `VERSION_SPECIFIC_FAILURE` |
 | HAProxy log fields: route, backend, server, timings, status, retry/termination flags, request ID | route-member observations | active checks only |
+
 | Prometheus access to HAProxy/app/system metrics | windows, capacity, overload | lower completeness; rules only |
 | Direct synthetic probe path per route group | recovery and low-traffic evidence | manual reintegration |
 | Nominal capacity or safe max concurrency | safety envelope | conservative fixed reserve/manual review |
