@@ -208,8 +208,8 @@ def system_capabilities(
                 "worker_process": ["Prometheus query", "direct probes", "HAProxy Runtime readback", "predeclared Runtime mutation"],
             },
             "prototype_support": {
-                "implemented": ["HEALTHY", "INSTANCE_DOWN", "ROUTE_INSTANCE_FAILURE", "SHARED_ROUTE_FAILURE", "UNKNOWN"],
-                "planned": ["INSTANCE_DEGRADED", "TRAFFIC_OVERLOAD", "VERSION_SPECIFIC_FAILURE", "ML classifier", "ELK", "local LLM"],
+                "implemented": ["HEALTHY", "INSTANCE_DOWN", "INSTANCE_DEGRADED", "ROUTE_INSTANCE_FAILURE", "SHARED_ROUTE_FAILURE", "UNKNOWN"],
+                "planned": ["TRAFFIC_OVERLOAD", "VERSION_SPECIFIC_FAILURE", "ML classifier", "ELK", "local LLM"],
             },
         },
     )

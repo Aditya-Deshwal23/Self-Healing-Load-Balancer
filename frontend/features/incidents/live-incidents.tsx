@@ -98,6 +98,16 @@ export function LiveIncidents({
     const confirmed = data.action?.attempts?.some((item) =>
       ["CONFIRMED", "ACKNOWLEDGEMENT_LOST_CONFIRMED"].includes(item.status),
     );
+    const actionDisplayState =
+      data.action &&
+      !confirmed &&
+      ["COMMITTED", "VERIFYING"].includes(data.action.lifecycle)
+        ? "CONFIRMING"
+        : data.action?.lifecycle;
+    const verificationDisplayState =
+      data.verification && data.action && !confirmed
+        ? "CONFIRMING"
+        : data.verification?.result;
     const stages = [
       {
         name: "Evidence",
@@ -122,7 +132,7 @@ export function LiveIncidents({
         name: "Action",
         ready: Boolean(data.action),
         summary: data.action
-          ? `${data.action.lifecycle} · ${data.action.target.backend}/${data.action.target.server}`
+          ? `${actionDisplayState} · ${data.action.target.backend}/${data.action.target.server}`
           : "No destructive action",
       },
       {
@@ -135,7 +145,7 @@ export function LiveIncidents({
       {
         name: "Verification",
         ready: Boolean(data.verification),
-        summary: data.verification?.result ?? "Not started",
+        summary: verificationDisplayState ?? "Not started",
       },
       {
         name: "Recovery",
@@ -332,8 +342,8 @@ export function LiveIncidents({
               </div>
               <div>
                 <span>Lifecycle</span>
-                <StatusTag tone={tone(data.action.lifecycle)}>
-                  {data.action.lifecycle}
+                <StatusTag tone={tone(actionDisplayState ?? "CONFIRMING")}>
+                  {actionDisplayState}
                 </StatusTag>
               </div>
               <div>
@@ -348,12 +358,12 @@ export function LiveIncidents({
               </div>
               <div>
                 <span>Runtime readback</span>
-                <strong>{confirmed ? "Confirmed" : "Not confirmed"}</strong>
+                <strong>{confirmed ? "Confirmed" : "Confirming observed state"}</strong>
               </div>
               <div>
                 <span>Verification</span>
-                <StatusTag tone={tone(data.verification?.result ?? "PENDING")}>
-                  {data.verification?.result ?? "COLLECTING"}
+                <StatusTag tone={tone(verificationDisplayState ?? "PENDING")}>
+                  {verificationDisplayState ?? "COLLECTING"}
                 </StatusTag>
               </div>
               <div>

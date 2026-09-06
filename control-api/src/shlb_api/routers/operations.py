@@ -281,8 +281,10 @@ def create_fault(environment_id: uuid.UUID, payload: LabFaultCreate, request: Re
         return replay.response_body
     target_map = {
         "CHECKOUT_INST_B_FAILURE": ("checkout", "inst-b"),
+        "INSTANCE_B_DEGRADED": ("public,auth", "inst-b"),
         "INST_B_DOWN": (None, "inst-b"),
         "SHARED_CHECKOUT_FAILURE": ("checkout", "all"),
+        "VERSION_V2_REGRESSION": ("checkout", "v2"),
         "UNKNOWN_CONFLICT": ("checkout", "inst-b"),
     }
     target_route, target_instance = target_map[payload.scenario]

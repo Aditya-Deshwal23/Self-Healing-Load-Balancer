@@ -112,6 +112,7 @@ def membership_resource(row: RouteMembership) -> dict[str, Any]:
         "id": str(row.id),
         "route_id": str(row.route_id),
         "instance_id": str(row.instance_id),
+        "version_id": str(row.version_id),
         "haproxy_backend": row.haproxy_backend,
         "haproxy_server": row.haproxy_server,
         "baseline_weight": row.baseline_weight,

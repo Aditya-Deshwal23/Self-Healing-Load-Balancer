@@ -39,7 +39,16 @@ from shlb_api.runtime import get_redis
 from shlb_api.security import canonical_hash
 from shlb_api.seed import IDS, INSTANCE_IDS, ROUTE_IDS
 from shlb_api.worker_io import HAProxyRuntime, HAProxyRuntimeError, LabProbeClient, PrometheusEvidence
-from shlb_api.worker_policy import INSTANCES, LAB_POLICY, ROUTES, RuleDecision, classify, instance_capacity, route_instance_capacity
+from shlb_api.worker_policy import (
+    INSTANCES,
+    LAB_POLICY,
+    ROUTES,
+    RuleDecision,
+    classify,
+    instance_capacity,
+    reintegration_evidence_passes,
+    route_instance_capacity,
+)
 
 
 WORKER_LOCK_ID = 0x53484C42
@@ -138,6 +147,8 @@ class ControlWorker:
             if committed and self._faults_are_clear(db):
                 if committed.action_kind == "INSTANCE_QUARANTINE":
                     self._restore_instance_action(db, committed, probes)
+                elif committed.action_kind == "INSTANCE_WEIGHT":
+                    self._restore_instance_weight_action(db, committed, probes)
                 else:
                     self._start_reintegration(db, committed)
                 return
@@ -156,7 +167,9 @@ class ControlWorker:
             if decision.final_class == "UNKNOWN" and active_fault and active_fault.scenario != "UNKNOWN_CONFLICT" and active_fault.applied_at and (utc_now() - active_fault.applied_at).total_seconds() < 20:
                 return
             incident, certificate = self._persist_decision(db, window, decision)
-            if decision.final_class == "ROUTE_INSTANCE_FAILURE" and decision.actionable:
+            if decision.final_class == "INSTANCE_DEGRADED" and decision.actionable:
+                self._prepare_and_apply_instance_weight_action(db, incident, certificate, memberships)
+            elif decision.final_class == "ROUTE_INSTANCE_FAILURE" and decision.actionable:
                 self._prepare_and_apply_route_action(db, incident, certificate, memberships)
             elif decision.final_class == "INSTANCE_DOWN" and decision.actionable:
                 self._prepare_and_apply_instance_action(db, incident, certificate, memberships)
@@ -196,10 +209,14 @@ class ControlWorker:
     def _fault_targets(self, fault: LabFault) -> tuple[list[str], str, str | None]:
         if fault.scenario == "CHECKOUT_INST_B_FAILURE":
             return ["inst-b"], "route_failure", "checkout"
+        if fault.scenario == "INSTANCE_B_DEGRADED":
+            return ["inst-b"], "instance_degraded", "public,auth"
         if fault.scenario == "INST_B_DOWN":
             return ["inst-b"], "instance_down", None
         if fault.scenario == "SHARED_CHECKOUT_FAILURE":
             return list(INSTANCES), "route_failure", "checkout"
+        if fault.scenario == "VERSION_V2_REGRESSION":
+            return ["inst-c", "inst-d"], "route_failure", "checkout"
         return ["inst-b"], "unknown_conflict", "checkout"
 
     def _process_fault_commands(self) -> None:
@@ -282,6 +299,7 @@ class ControlWorker:
         now = utc_now()
         summary_map = {
             "ROUTE_INSTANCE_FAILURE": "Checkout fails only on inst-b while peers and sibling routes remain healthy.",
+            "INSTANCE_DEGRADED": "Inst-b remains reachable but is degraded across multiple routes; bounded weight reduction is preferred to ejection.",
             "SHARED_ROUTE_FAILURE": "Checkout fails across all physical instances; mass ejection is prohibited.",
             "INSTANCE_DOWN": "All registered routes on inst-b fail direct application probes.",
             "UNKNOWN": "Evidence is conflicting or incomplete; destructive action is prohibited.",
@@ -321,6 +339,37 @@ class ControlWorker:
                 {"unit": "ROUTE_INSTANCE", "result": "rejected", "reason": "failure spans all registered routes on inst-b"},
                 {"unit": "SHARED_ROUTE", "result": "rejected", "reason": "healthy physical peers remain for every route"},
             ]
+        elif decision.final_class == "INSTANCE_DEGRADED":
+            target_instance = decision.instance
+            if target_instance not in INSTANCE_IDS:
+                raise RuntimeError("degraded instance is not registered")
+            runtime_memberships = self.runtime.memberships()
+            target_rows = {item["server"]: item for item in runtime_memberships if item["server"] == f"srv_{target_instance.replace('-', '_')}"}
+            queues = {
+                instance: max((item["queue"] for item in runtime_memberships if item["server"] == f"srv_{instance.replace('-', '_')}"), default=0)
+                for instance in INSTANCES
+            }
+            total_capacity = sum(100 for _ in INSTANCES)
+            reduction = 50
+            remaining_capacity = total_capacity - reduction
+            safety = {
+                "allowed": bool(target_rows) and remaining_capacity / total_capacity * 100 >= LAB_POLICY.minimum_physical_reserve_percent and all(
+                    value <= LAB_POLICY.peer_queue_limit for instance, value in queues.items() if instance != target_instance
+                ),
+                "capacity_semantics": "unique physical instances with bounded target reduction",
+                "target_instance": target_instance,
+                "target_weight_before": 100,
+                "target_weight_after": 100 - reduction,
+                "total_physical_capacity": total_capacity,
+                "remaining_physical_capacity": remaining_capacity,
+                "remaining_percent": round(remaining_capacity / total_capacity * 100, 1),
+                "peer_queues": {instance: value for instance, value in queues.items() if instance != target_instance},
+                "queue_limit": LAB_POLICY.peer_queue_limit,
+            }
+            candidates = [
+                {"unit": "INSTANCE_WEIGHT", "targets": [f"all memberships on {target_instance}"], "result": "selected" if safety["allowed"] else "rejected", "reason": "bounded reduction preserves reachable endpoint" if safety["allowed"] else "capacity or queue guard failed"},
+                {"unit": "INSTANCE", "result": "rejected", "reason": "direct probes remain healthy; full drain is unnecessarily broad"},
+            ]
         certificate_payload = {"scope": decision.support, "safety": safety, "candidates": candidates, "window_id": str(window.id), "fingerprint": fingerprint_hash}
         certificate = EvidenceCertificate(incident_id=incident.id, observation_window_id=window.id, fingerprint_id=fingerprint.id, classification_id=classification.id, certificate_hash=canonical_hash(certificate_payload), scope_evidence=decision.support, safety_inputs=safety, candidate_actions=candidates)
         db.add(certificate)
@@ -329,6 +378,84 @@ class ControlWorker:
         self._event(db, event_type="classification_completed", aggregate_type="classification", aggregate_id=classification.id, aggregate_version=classification.revision, incident_id=incident.id, data={"final_class": decision.final_class, "confidence": decision.confidence, "completeness": decision.completeness, "actionable": decision.actionable})
         self._commit_publish(db)
         return incident, certificate
+
+    def _prepare_and_apply_instance_weight_action(self, db: Session, incident: Incident, certificate: EvidenceCertificate, memberships: list[dict]) -> None:
+        if not certificate.safety_inputs.get("allowed"):
+            incident.status = "NEEDS_REVIEW"
+            incident.version += 1
+            self._commit_publish(db)
+            return
+        if db.scalar(select(Action).where(Action.incident_id == incident.id).limit(1)):
+            return
+        target_instance = next((key for key, value in INSTANCE_IDS.items() if value == incident.instance_id), None)
+        if target_instance is None:
+            raise RuntimeError("degraded incident has no registered target instance")
+        target_server = f"srv_{target_instance.replace('-', '_')}"
+        registered = db.scalars(select(RouteMembership).where(RouteMembership.instance_id == incident.instance_id)).all()
+        if len(registered) != len(ROUTES):
+            raise RuntimeError("registered degraded membership set is incomplete")
+        targets = sorted((membership.haproxy_backend, membership.haproxy_server, membership.id) for membership in registered)
+        before_by_target = {(item["backend"], item["server"]): item for item in memberships}
+        if any((backend, server) not in before_by_target for backend, server, _ in targets):
+            raise RuntimeError("HAProxy Runtime mapping changed before degraded action")
+        desired_rows = {row.membership_id: row for row in db.scalars(select(DesiredRouteState).where(DesiredRouteState.membership_id.in_([membership_id for _, _, membership_id in targets]))).all()}
+        if len(desired_rows) != len(targets):
+            raise RuntimeError("durable desired state is incomplete for degraded instance")
+        previous_desired = {f"{backend}/{server}": {"admin_state": desired_rows[membership_id].admin_state, "weight": desired_rows[membership_id].weight} for backend, server, membership_id in targets}
+        previous_observed = {f"{backend}/{server}": before_by_target[(backend, server)] for backend, server, _ in targets}
+        requested_targets = {f"{backend}/{server}": {"admin_state": "ready", "weight": 50} for backend, server, _ in targets}
+        peers = sorted(f"{item['backend']}/{item['server']}" for item in memberships if item["server"] != target_server)
+        now = utc_now()
+        representative = targets[0]
+        action = Action(environment_id=incident.environment_id, incident_id=incident.id, evidence_certificate_id=certificate.id, membership_id=representative[2], action_kind="INSTANCE_WEIGHT", lifecycle="PREPARED", controller_generation=self.generation, haproxy_backend="all_routes", haproxy_server=target_server, previous_desired={"targets": previous_desired}, previous_observed={"targets": previous_observed}, requested_state={"admin_state": "ready", "weight": 50, "targets": requested_targets}, expected_effect="Reduce all degraded-instance memberships to bounded weight 50 without ejecting the reachable instance.", preservation_set=peers, verification_criteria={"affected_error_or_p95_improves": True, "minimum_real_samples_per_route": LAB_POLICY.instance_route_minimum_samples, "peer_queue_max": LAB_POLICY.peer_queue_limit, "physical_instance_ejections": 0}, rollback_strategy={"targets": previous_desired, "trigger": ["INEFFECTIVE", "HARMFUL", "READBACK_MISMATCH"]}, idempotency_key=f"controller-g{self.generation}:{incident.id}:instance-weight-{target_instance}", expires_at=now + timedelta(seconds=LAB_POLICY.action_expiry_seconds))
+        db.add(action)
+        db.flush()
+        for _, _, membership_id in targets:
+            desired = desired_rows[membership_id]
+            desired.admin_state = "ready"
+            desired.weight = 50
+            desired.controller_generation = self.generation
+            desired.source_action_id = action.id
+            desired.version += 1
+        self._event(db, event_type="action_planned", aggregate_type="action", aggregate_id=action.id, aggregate_version=action.version, incident_id=incident.id, action_id=action.id, data={"targets": list(requested_targets), "requested_state": action.requested_state, "safety": certificate.safety_inputs})
+        self._commit_publish(db)
+
+        attempt = ActionAttempt(action_id=action.id, sequence=1, operation="set_absolute_instance_weights", status="ISSUED", command_hash=canonical_hash(requested_targets), issued_at=utc_now(), response={}, observed_state={})
+        db.add(attempt)
+        db.commit()
+        responses: dict[str, dict] = {}
+        runtime_error: Exception | None = None
+        for backend, server, _ in targets:
+            try:
+                responses[f"{backend}/{server}"] = self.runtime.set_absolute(backend, server, admin_state="ready", weight=50)
+            except HAProxyRuntimeError as exc:
+                runtime_error = exc
+                break
+        after = self.runtime.memberships()
+        after_by_target = {(item["backend"], item["server"]): item for item in after}
+        targets_confirmed = all(after_by_target.get((backend, server), {}).get("admin_state") == "ready" and after_by_target.get((backend, server), {}).get("weight") == 50 for backend, server, _ in targets)
+        peers_before = {(item["backend"], item["server"]): (item["admin_state"], item["weight"]) for item in memberships if item["server"] != target_server}
+        peers_after = {(item["backend"], item["server"]): (item["admin_state"], item["weight"]) for item in after if item["server"] != target_server}
+        peers_preserved = peers_before == peers_after
+        attempt.completed_at = utc_now()
+        attempt.response = {"targets": responses, "error_type": type(runtime_error).__name__ if runtime_error else None}
+        attempt.observed_state = {"targets": {f"{backend}/{server}": after_by_target.get((backend, server), {}) for backend, server, _ in targets}, "physical_peers_preserved": peers_preserved, "physical_instance_ejections": 0}
+        if targets_confirmed and peers_preserved:
+            attempt.status = "ACKNOWLEDGEMENT_LOST_CONFIRMED" if runtime_error else "CONFIRMED"
+            action.lifecycle = "VERIFYING"
+            incident.status = "VERIFYING"
+            event_type = "action_applied"
+        else:
+            attempt.status = "RESULT_UNKNOWN"
+            attempt.error_code = "ACKNOWLEDGEMENT_LOST" if runtime_error else "READBACK_MISMATCH"
+            action.lifecycle = "RESULT_UNKNOWN"
+            incident.status = "NEEDS_REVIEW"
+            event_type = "drift_detected"
+        action.version += 1
+        incident.version += 1
+        db.add(ObservedStateSnapshot(environment_id=incident.environment_id, action_id=action.id, source="HAPROXY_RUNTIME", process_id=self.runtime.info().get("Pid"), config_identifier=self.runtime.info().get("Config hash") or self.runtime.info().get("Release_date"), observed_at=utc_now(), memberships=after))
+        self._event(db, event_type=event_type, aggregate_type="action", aggregate_id=action.id, aggregate_version=action.version, incident_id=incident.id, action_id=action.id, data={"lifecycle": action.lifecycle, "targets_confirmed": targets_confirmed, "physical_peers_preserved": peers_preserved, "physical_instance_ejections": 0})
+        self._commit_publish(db)
 
     def _prepare_and_apply_route_action(self, db: Session, incident: Incident, certificate: EvidenceCertificate, memberships: list[dict]) -> None:
         if not certificate.safety_inputs.get("allowed"):
@@ -525,6 +652,45 @@ class ControlWorker:
             self._event(db, event_type=event_type, aggregate_type="action", aggregate_id=action.id, aggregate_version=action.version, incident_id=incident.id, action_id=action.id, data=data)
             self._commit_publish(db)
             return
+        if action.action_kind == "INSTANCE_WEIGHT":
+            current = self.runtime.memberships()
+            current_by_target = {f"{item['backend']}/{item['server']}": item for item in current}
+            targets = action.requested_state.get("targets", {})
+            requested_matches = bool(targets) and all(
+                current_by_target.get(target, {}).get("admin_state") == requested.get("admin_state")
+                and current_by_target.get(target, {}).get("weight") == requested.get("weight")
+                for target, requested in targets.items()
+            )
+            peers = [item for item in current if item["server"] != action.haproxy_server]
+            peers_preserved = all(item["admin_state"] == "ready" and item["weight"] == 100 for item in peers)
+            attempt = db.scalar(select(ActionAttempt).where(ActionAttempt.action_id == action.id).order_by(ActionAttempt.sequence.desc()).limit(1))
+            incident = db.get(Incident, action.incident_id)
+            if requested_matches and peers_preserved:
+                action.lifecycle = "VERIFYING"
+                incident.status = "VERIFYING"
+                if attempt and attempt.status == "ISSUED":
+                    attempt.status = "ACKNOWLEDGEMENT_LOST_CONFIRMED"
+                    attempt.completed_at = utc_now()
+                    attempt.response = {"restart_reconciliation": True, "blind_retry": False}
+                    attempt.observed_state = {"targets": {target: current_by_target.get(target) for target in targets}, "physical_peers_preserved": True, "physical_instance_ejections": 0}
+                event_type = "action_applied"
+                data = {"lifecycle": "VERIFYING", "restart_reconciliation": True, "blind_retry": False, "targets_confirmed": True, "physical_peers_preserved": True, "physical_instance_ejections": 0}
+            else:
+                action.lifecycle = "RESULT_UNKNOWN"
+                incident.status = "NEEDS_REVIEW"
+                if attempt:
+                    attempt.status = "RESULT_UNKNOWN"
+                    attempt.completed_at = utc_now()
+                    attempt.error_code = "RESTART_READBACK_MISMATCH"
+                    attempt.observed_state = {"targets": {target: current_by_target.get(target) for target in targets}, "physical_peers_preserved": peers_preserved, "physical_instance_ejections": 0}
+                event_type = "drift_detected"
+                data = {"reason": "unfinished degraded action did not match requested readback after restart", "blind_retry": False, "targets_confirmed": requested_matches, "physical_peers_preserved": peers_preserved, "physical_instance_ejections": 0}
+            action.version += 1
+            incident.version += 1
+            db.add(ObservedStateSnapshot(environment_id=action.environment_id, action_id=action.id, source="HAPROXY_RUNTIME", process_id=self.runtime.info().get("Pid"), config_identifier=self.runtime.info().get("Config hash") or self.runtime.info().get("Release_date"), observed_at=utc_now(), memberships=current))
+            self._event(db, event_type=event_type, aggregate_type="action", aggregate_id=action.id, aggregate_version=action.version, incident_id=incident.id, action_id=action.id, data=data)
+            self._commit_publish(db)
+            return
         observed = self.runtime.read(action.haproxy_backend, action.haproxy_server)
         siblings = [item for item in self.runtime.memberships() if item["server"] == action.haproxy_server and item["backend"] != action.haproxy_backend]
         preserved = all(item["admin_state"] == "ready" and item["weight"] == 100 for item in siblings)
@@ -560,6 +726,9 @@ class ControlWorker:
     def _verify_action(self, db: Session, action: Action, window: ObservationWindow, evidence: dict, memberships: list[dict]) -> None:
         if action.action_kind == "INSTANCE_QUARANTINE":
             self._verify_instance_action(db, action, evidence, memberships)
+            return
+        if action.action_kind == "INSTANCE_WEIGHT":
+            self._verify_instance_weight_action(db, action, evidence, memberships)
             return
         checkout_members = [evidence[f"checkout/{instance}"] for instance in INSTANCES]
         affected_samples = sum(item["samples"] for item in checkout_members)
@@ -606,10 +775,97 @@ class ControlWorker:
         self._event(db, event_type="verification_updated", aggregate_type="verification", aggregate_id=verification.id, aggregate_version=revision, incident_id=action.incident_id, action_id=action.id, data={"result": result, "affected": verification.affected_obligation, "preservation": verification.preservation_obligation, "action_lifecycle": action.lifecycle})
         self._commit_publish(db)
 
+    def _verify_instance_weight_action(self, db: Session, action: Action, evidence: dict, memberships: list[dict]) -> None:
+        target_instance = action.haproxy_server.removeprefix("srv_").replace("_", "-")
+        target_rows = [evidence[f"{route}/{target_instance}"] for route in ROUTES]
+        peer_rows = [evidence[f"{route}/{peer}"] for route in ROUTES for peer in INSTANCES if peer != target_instance]
+        affected_samples = sum(item["samples"] for item in target_rows)
+        affected_error_rates = [item["error_rate"] for item in target_rows if item["error_rate"] is not None]
+        peer_error_rates = [item["error_rate"] for item in peer_rows if item["error_rate"] is not None]
+        target_p95 = [item["p95_ms"] for item in target_rows if item["p95_ms"] is not None]
+        peer_p95 = [item["p95_ms"] for item in peer_rows if item["p95_ms"] is not None]
+        affected_ok = (
+            affected_samples >= LAB_POLICY.instance_route_minimum_samples * len(ROUTES)
+            and (not affected_error_rates or max(affected_error_rates) <= max(peer_error_rates or [LAB_POLICY.healthy_rate]))
+            and (not target_p95 or max(target_p95) <= max(peer_p95 or target_p95) * LAB_POLICY.degraded_p95_multiplier)
+        )
+        peer_queues = {item["server"]: item["queue"] for item in memberships if item["server"] != action.haproxy_server}
+        preservation_ok = all(value <= LAB_POLICY.peer_queue_limit for value in peer_queues.values()) and all(item["admin_state"] == "ready" and item["weight"] == 100 for item in memberships if item["server"] != action.haproxy_server)
+        expanded_to_drain = bool(action.requested_state.get("expanded_to_drain"))
+        expected_weight = 0 if expanded_to_drain else 50
+        target_aligned = all(item["server"] == action.haproxy_server and item["admin_state"] == ("drain" if expanded_to_drain else "ready") and item["weight"] == expected_weight or item["server"] != action.haproxy_server for item in memberships)
+        harmful = any(value > LAB_POLICY.harmful_queue_limit for value in peer_queues.values())
+        elapsed = (utc_now() - action.created_at).total_seconds()
+        if harmful:
+            result = "HARMFUL"
+        elif affected_ok and preservation_ok and target_aligned:
+            result = "EFFECTIVE"
+        elif elapsed >= LAB_POLICY.verification_timeout_seconds and affected_samples >= LAB_POLICY.instance_route_minimum_samples * len(ROUTES):
+            result = "INEFFECTIVE"
+        else:
+            result = "INSUFFICIENT_EVIDENCE"
+        strong_affected = (
+            affected_ok
+            and all(rate <= LAB_POLICY.healthy_rate for rate in affected_error_rates)
+            and (not target_p95 or max(target_p95) <= max(peer_p95 or target_p95) * 1.25)
+        )
+        if result == "EFFECTIVE" and strong_affected and preservation_ok and not expanded_to_drain:
+            drain_targets = {
+                target: {"admin_state": "drain", "weight": 0}
+                for target in action.requested_state.get("targets", {})
+            }
+            for target in drain_targets:
+                backend, _, server = target.partition("/")
+                self.runtime.set_absolute(backend, server, admin_state="drain", weight=0)
+                membership = db.scalar(select(RouteMembership).where(RouteMembership.haproxy_backend == backend, RouteMembership.haproxy_server == server))
+                desired = db.scalar(select(DesiredRouteState).where(DesiredRouteState.membership_id == membership.id)) if membership else None
+                if desired is None:
+                    raise RuntimeError("cannot persist degraded drain expansion state")
+                desired.admin_state = "drain"
+                desired.weight = 0
+                desired.controller_generation = self.generation
+                desired.version += 1
+            action.requested_state = {**action.requested_state, "admin_state": "drain", "weight": 0, "targets": drain_targets, "expanded_to_drain": True}
+            action.version += 1
+            self._event(db, event_type="action_expanded", aggregate_type="action", aggregate_id=action.id, aggregate_version=action.version, incident_id=action.incident_id, action_id=action.id, data={"reason": "bounded reduction passed strong affected and preservation obligations", "expanded_to_drain": True})
+            self._commit_publish(db)
+            return
+        revision = (db.scalar(select(func.max(VerificationResult.revision)).where(VerificationResult.action_id == action.id)) or 0) + 1
+        verification = VerificationResult(action_id=action.id, revision=revision, result=result, affected_obligation={"passed": affected_ok, "sample_count": affected_samples, "target_error_rates": affected_error_rates, "target_p95_ms": target_p95, "p95_populated": bool(target_p95)}, preservation_obligation={"passed": preservation_ok and target_aligned, "peer_queues": peer_queues, "physical_instance_ejections": 0, "target_weight": 50}, sample_count=affected_samples, started_at=action.created_at, completed_at=utc_now() if result != "INSUFFICIENT_EVIDENCE" else None)
+        db.add(verification)
+        db.flush()
+        incident = db.get(Incident, action.incident_id)
+        if result == "EFFECTIVE":
+            action.lifecycle = "COMMITTED"
+            action.terminal_at = utc_now()
+            action.version += 1
+            incident.status = "MITIGATING"
+            incident.version += 1
+        elif result in {"HARMFUL", "INEFFECTIVE"}:
+            for target, state in action.rollback_strategy.get("targets", {}).items():
+                backend, _, server = target.partition("/")
+                membership = db.scalar(select(RouteMembership).where(RouteMembership.haproxy_backend == backend, RouteMembership.haproxy_server == server))
+                desired = db.scalar(select(DesiredRouteState).where(DesiredRouteState.membership_id == membership.id)) if membership else None
+                if desired is None:
+                    raise RuntimeError("cannot restore degraded desired state during rollback")
+                desired.admin_state = str(state["admin_state"])
+                desired.weight = int(state["weight"])
+                desired.controller_generation = self.generation
+                desired.version += 1
+            rollback_ok, observed = self._apply_instance_states(action.rollback_strategy.get("targets", {}))
+            action.lifecycle = "ROLLED_BACK" if rollback_ok else "ROLLBACK_FAILED"
+            action.terminal_at = utc_now()
+            action.version += 1
+            incident.status = "NEEDS_REVIEW"
+            incident.version += 1
+            self._event(db, event_type="rollback_started", aggregate_type="action", aggregate_id=action.id, aggregate_version=action.version, incident_id=action.incident_id, action_id=action.id, data={"verification_result": result, "rollback_confirmed": rollback_ok, "observed": observed, "physical_instance_ejections": 0})
+        self._event(db, event_type="verification_updated", aggregate_type="verification", aggregate_id=verification.id, aggregate_version=revision, incident_id=action.incident_id, action_id=action.id, data={"result": result, "affected": verification.affected_obligation, "preservation": verification.preservation_obligation, "action_lifecycle": action.lifecycle})
+        self._commit_publish(db)
+
     def _verify_instance_action(self, db: Session, action: Action, evidence: dict, memberships: list[dict]) -> None:
         route_results: dict[str, dict] = {}
         for route in ROUTES:
-            peers = [evidence[f"{route}/{instance}"] for instance in ("inst-a", "inst-c")]
+            peers = [evidence[f"{route}/{instance}"] for instance in INSTANCES if instance != "inst-b"]
             samples = sum(item["samples"] for item in peers)
             errors = sum(item["errors"] for item in peers)
             rate = errors / samples if samples else None
@@ -719,6 +975,47 @@ class ControlWorker:
             self._event(db, event_type="drift_detected", aggregate_type="action", aggregate_id=action.id, aggregate_version=action.version, incident_id=incident.id, action_id=action.id, data={"reason": "instance restore did not match Runtime readback", "observed": observed, "blind_retry": False})
         self._commit_publish(db)
 
+    def _restore_instance_weight_action(self, db: Session, action: Action, probes: dict) -> None:
+        target_instance = action.haproxy_server.removeprefix("srv_").replace("_", "-")
+        probe_ok = all(probes[f"{route}/{target_instance}"].get("application_ok") is True for route in ROUTES)
+        if not probe_ok:
+            return
+        targets = action.rollback_strategy.get("targets", {})
+        for target, state in targets.items():
+            backend, _, server = target.partition("/")
+            membership = db.scalar(select(RouteMembership).where(RouteMembership.haproxy_backend == backend, RouteMembership.haproxy_server == server))
+            desired = db.scalar(select(DesiredRouteState).where(DesiredRouteState.membership_id == membership.id)) if membership else None
+            if desired is None:
+                raise RuntimeError("cannot restore an unregistered degraded membership")
+            desired.admin_state = str(state["admin_state"])
+            desired.weight = int(state["weight"])
+            desired.controller_generation = self.generation
+            desired.version += 1
+        sequence = (db.scalar(select(func.max(ActionAttempt.sequence)).where(ActionAttempt.action_id == action.id)) or 0) + 1
+        attempt = ActionAttempt(action_id=action.id, sequence=sequence, operation="restore_instance_weight_after_probe_gate", status="ISSUED", command_hash=canonical_hash(targets), issued_at=utc_now(), response={}, observed_state={})
+        db.add(attempt)
+        db.commit()
+        confirmed, observed = self._apply_instance_states(targets)
+        attempt.completed_at = utc_now()
+        attempt.observed_state = {"targets": observed, "physical_instance_ejections": 0}
+        incident = db.get(Incident, action.incident_id)
+        if confirmed:
+            attempt.status = "CONFIRMED"
+            incident.status = "RESOLVED"
+            incident.resolved_at = utc_now()
+            incident.last_observed_at = incident.resolved_at
+            incident.version += 1
+            self._event(db, event_type="incident_resolved", aggregate_type="incident", aggregate_id=incident.id, aggregate_version=incident.version, incident_id=incident.id, action_id=action.id, data={"resolution": "degraded probe gate and full-weight restore confirmed", "restored_targets": list(targets), "physical_instance_ejections": 0})
+        else:
+            attempt.status = "RESULT_UNKNOWN"
+            attempt.error_code = "RESTORE_READBACK_MISMATCH"
+            action.lifecycle = "RESULT_UNKNOWN"
+            action.version += 1
+            incident.status = "NEEDS_REVIEW"
+            incident.version += 1
+            self._event(db, event_type="drift_detected", aggregate_type="action", aggregate_id=action.id, aggregate_version=action.version, incident_id=incident.id, action_id=action.id, data={"reason": "degraded restore did not match Runtime readback", "observed": observed, "blind_retry": False, "physical_instance_ejections": 0})
+        self._commit_publish(db)
+
     @staticmethod
     def _faults_are_clear(db: Session) -> bool:
         return (db.scalar(select(func.count(LabFault.id)).where(LabFault.environment_id == IDS["environment"], LabFault.status.not_in(TERMINAL_FAULTS))) or 0) == 0
@@ -731,7 +1028,8 @@ class ControlWorker:
         run = ReintegrationRun(environment_id=action.environment_id, incident_id=action.incident_id, action_id=action.id, status="ACTIVE", current_stage="PROBING", last_verified_stage="QUARANTINED", retry_count=0, maximum_retries=LAB_POLICY.maximum_reintegration_retries, next_transition_at=now, started_at=now)
         db.add(run)
         db.flush()
-        for sequence, (name, weight, minimum) in enumerate(LAB_POLICY.reintegration_stages):
+        stages = self._reintegration_stages(action)
+        for sequence, (name, weight, minimum) in enumerate(stages):
             db.add(ReintegrationStage(run_id=run.id, sequence=sequence, name=name, requested_weight=weight, observed_weight=0 if name == "PROBING" else None, status="CURRENT" if name == "PROBING" else "PENDING", sample_count=0, minimum_samples=minimum, started_at=now if name == "PROBING" else None, result={}))
         incident = db.get(Incident, action.incident_id)
         incident.status = "RECOVERING"
@@ -739,15 +1037,88 @@ class ControlWorker:
         self._event(db, event_type="reintegration_progress", aggregate_type="reintegration", aggregate_id=run.id, aggregate_version=run.version, incident_id=run.incident_id, action_id=run.action_id, data={"status": run.status, "stage": "PROBING", "last_verified_stage": "QUARANTINED"})
         self._commit_publish(db)
 
+    @staticmethod
+    def _reintegration_scope(action: Action) -> str:
+        return {
+            "ROUTE_MEMBERSHIP_QUARANTINE": "ROUTE_INSTANCE",
+            "INSTANCE_QUARANTINE": "COMPLETE_INSTANCE",
+            "INSTANCE_WEIGHT": "COMPLETE_INSTANCE",
+            "VERSION_GROUP": "VERSION_GROUP",
+            "COMPLETE_ROUTE": "COMPLETE_ROUTE",
+            "ROUTE_ADMISSION_PROTECTION": "OVERLOAD",
+        }.get(action.action_kind, "ROUTE_INSTANCE")
+
+    @classmethod
+    def _reintegration_targets(cls, action: Action) -> list[tuple[str, str]]:
+        targets = action.requested_state.get("targets", {}) if isinstance(action.requested_state, dict) else {}
+        if targets:
+            parsed = [tuple(key.split("/", 1)) for key in targets if "/" in key]
+            route_order = {"checkout": 0, "auth": 1, "public": 2, "catalog": 3}
+            return sorted(parsed, key=lambda target: (route_order.get(target[0].removeprefix("be_"), 99), target[1]))
+        return [(action.haproxy_backend, action.haproxy_server)]
+
+    @classmethod
+    def _reintegration_keys(cls, action: Action) -> list[str]:
+        return [f"{backend.removeprefix('be_')}/{server.removeprefix('srv_').replace('_', '-')}" for backend, server in cls._reintegration_targets(action)]
+
+    @classmethod
+    def _reintegration_stages(cls, action: Action) -> tuple[tuple[str, int | None, int], ...]:
+        scope = cls._reintegration_scope(action)
+        if scope in {"COMPLETE_ROUTE", "OVERLOAD"}:
+            # Protection scopes restore controls in their documented order; they
+            # do not use the percentage-weight saga.
+            return (
+                ("DEPENDENCY", None, 3),
+                ("RETRY_SUPPRESSED", None, 3),
+                ("ADMITTED_SHARE", None, 4),
+                ("TRAFFIC", None, 6),
+                ("PROTECTION", None, 8),
+                ("RETRIES", None, 1),
+            )
+        return LAB_POLICY.reintegration_stages
+
+    @classmethod
+    def _reintegration_restore_order(cls, action: Action) -> tuple[str, ...]:
+        scope = cls._reintegration_scope(action)
+        return LAB_POLICY.reintegration_scope_orders[scope]
+
     def _set_reintegration_state(self, db: Session, run: ReintegrationRun, action: Action, weight: int) -> dict:
-        desired = db.scalar(select(DesiredRouteState).where(DesiredRouteState.membership_id == action.membership_id))
-        desired.admin_state = "ready" if weight > 0 else "drain"
-        desired.weight = weight
-        desired.controller_generation = self.generation
-        desired.source_action_id = action.id
-        desired.version += 1
+        target_rows = self._reintegration_targets(action)
+        membership_rows = db.scalars(
+            select(RouteMembership).where(
+                RouteMembership.haproxy_backend.in_([backend for backend, _ in target_rows]),
+                RouteMembership.haproxy_server.in_([server for _, server in target_rows]),
+            )
+        ).all()
+        membership_by_target = {(row.haproxy_backend, row.haproxy_server): row for row in membership_rows}
+        desired_rows = {
+            row.membership_id: row
+            for row in db.scalars(
+                select(DesiredRouteState).where(
+                    DesiredRouteState.membership_id.in_([membership_by_target[target].id for target in target_rows if target in membership_by_target])
+                )
+            ).all()
+        }
+        for target in target_rows:
+            membership = membership_by_target.get(target)
+            desired = desired_rows.get(membership.id) if membership else None
+            if desired is None:
+                raise RuntimeError(f"reintegration target has no durable desired state: {target}")
+            desired.admin_state = "ready" if weight > 0 else "drain"
+            desired.weight = weight
+            desired.controller_generation = self.generation
+            desired.source_action_id = action.id
+            desired.version += 1
         db.commit()
-        return self.runtime.set_absolute(action.haproxy_backend, action.haproxy_server, admin_state="ready" if weight > 0 else "drain", weight=weight)["observed"]
+        observed = {}
+        for backend, server in target_rows:
+            observed = self.runtime.set_absolute(
+                backend,
+                server,
+                admin_state="ready" if weight > 0 else "drain",
+                weight=weight,
+            )["observed"]
+        return observed
 
     def _advance_reintegration(self, db: Session, run: ReintegrationRun, evidence: dict, probes: dict) -> None:
         action = db.get(Action, run.action_id)
@@ -756,8 +1127,21 @@ class ControlWorker:
             self._recover_reintegration_transition(db, run, action)
             return
         now = utc_now()
-        target_probe = probes["checkout/inst-b"]
-        target_evidence = evidence["checkout/inst-b"]
+        scope = self._reintegration_scope(action)
+        keys = self._reintegration_keys(action)
+        target_probes = [probes.get(key, {}) for key in keys]
+        target_evidence_rows = [evidence.get(key, {}) for key in keys]
+        target_probe = target_probes[0] if target_probes else {}
+        target_evidence = target_evidence_rows[0] if target_evidence_rows else {}
+        complete_probe = bool(target_probes) and all(item.get("application_ok") is True for item in target_probes)
+        complete_evidence = bool(target_evidence_rows) and all(
+            item.get("samples", 0) > 0 and item.get("error_rate") is not None for item in target_evidence_rows
+        )
+        healthy_evidence = reintegration_evidence_passes(
+            target_evidence_rows,
+            target_probes,
+            stage.minimum_samples,
+        )
         if stage.requested_weight is not None:
             observed = self.runtime.read(action.haproxy_backend, action.haproxy_server)
             expected_admin = "ready" if stage.requested_weight > 0 else "drain"
@@ -774,7 +1158,14 @@ class ControlWorker:
         if stage.name == "PROBING":
             stage.sample_count = stage.sample_count + 1 if target_probe.get("application_ok") is True else 0
             stage.result = {"direct_probe": target_probe, "consecutive_passes": stage.sample_count}
-            if stage.sample_count >= stage.minimum_samples:
+            if (
+                stage.sample_count >= stage.minimum_samples
+                and reintegration_evidence_passes(
+                    target_evidence_rows,
+                    target_probes,
+                    stage.minimum_samples,
+                )
+            ):
                 stage.status = "VERIFIED"
                 stage.verified_at = now
                 run.last_verified_stage = "PROBING"
@@ -786,8 +1177,8 @@ class ControlWorker:
                 run.current_stage = next_stage.name
                 run.next_transition_at = now + timedelta(seconds=LAB_POLICY.reintegration_cooldown_seconds)
                 run.version += 1
-        elif stage.name == "HEALTHY":
-            if target_probe.get("application_ok") is True:
+        elif stage.name in {"HEALTHY", "RETRIES"}:
+            if complete_probe and (scope in {"COMPLETE_ROUTE", "OVERLOAD"} or healthy_evidence):
                 stage.sample_count += 1
             if stage.sample_count >= stage.minimum_samples:
                 stage.status = "VERIFIED"
@@ -805,11 +1196,19 @@ class ControlWorker:
                 incident.version += 1
                 self._event(db, event_type="incident_resolved", aggregate_type="incident", aggregate_id=incident.id, aggregate_version=incident.version, incident_id=incident.id, action_id=action.id, data={"resolution": "verified staged reintegration", "final_weight": 100})
         else:
-            stage.sample_count = target_evidence["samples"]
-            stage.result = {"error_rate": target_evidence["error_rate"], "real_samples": target_evidence["samples"], "direct_probe": target_probe}
+            samples = min((item.get("samples", 0) for item in target_evidence_rows), default=0)
+            stage.sample_count = samples
+            stage.result = {
+                "scope": scope,
+                "restore_order": self._reintegration_restore_order(action),
+                "targets": dict(zip(keys, target_evidence_rows)),
+                "direct_probes": dict(zip(keys, target_probes)),
+            }
             elapsed = (now - stage.started_at).total_seconds() if stage.started_at else 0
-            failed = target_probe.get("application_ok") is not True or (target_evidence["samples"] >= 2 and target_evidence["error_rate"] is not None and target_evidence["error_rate"] > LAB_POLICY.healthy_rate)
-            timed_out = elapsed > LAB_POLICY.reintegration_stage_timeout_seconds and target_evidence["samples"] < stage.minimum_samples
+            failed = not complete_probe or any(item.get("error_rate", 1) > LAB_POLICY.healthy_rate for item in target_evidence_rows)
+            timed_out = elapsed > LAB_POLICY.reintegration_stage_timeout_seconds and (
+                not complete_evidence or samples < stage.minimum_samples
+            )
             if failed or timed_out:
                 run.retry_count += 1
                 stage.status = "FAILED"
@@ -832,13 +1231,23 @@ class ControlWorker:
                     run.last_verified_stage = "QUARANTINED" if fallback_weight == 0 else run.last_verified_stage
                     run.next_transition_at = now + timedelta(seconds=LAB_POLICY.reintegration_cooldown_seconds)
                 run.version += 1
-            elif elapsed >= LAB_POLICY.reintegration_cooldown_seconds and target_evidence["samples"] >= stage.minimum_samples and target_evidence["error_rate"] is not None and target_evidence["error_rate"] <= LAB_POLICY.healthy_rate:
+            elif (
+                elapsed >= LAB_POLICY.reintegration_cooldown_seconds
+                and healthy_evidence
+            ):
                 stage.status = "VERIFIED"
                 stage.verified_at = now
                 stage.observed_weight = self.runtime.read(action.haproxy_backend, action.haproxy_server)["weight"]
                 run.last_verified_stage = stage.name
                 next_stage = db.scalar(select(ReintegrationStage).where(ReintegrationStage.run_id == run.id, ReintegrationStage.sequence == stage.sequence + 1))
-                if next_stage.name == "HEALTHY":
+                if next_stage is None:
+                    run.status = "NEEDS_REVIEW"
+                    run.current_stage = "NEEDS_REVIEW"
+                    incident = db.get(Incident, run.incident_id)
+                    incident.status = "NEEDS_REVIEW"
+                    incident.version += 1
+                    run.version += 1
+                elif next_stage.name in {"HEALTHY", "RETRIES", "DEPENDENCY", "RETRY_SUPPRESSED", "ADMITTED_SHARE", "TRAFFIC", "PROTECTION"}:
                     next_stage.observed_weight = 100
                 else:
                     observed = self._set_reintegration_state(db, run, action, int(next_stage.requested_weight))
@@ -853,21 +1262,50 @@ class ControlWorker:
 
     def _recover_reintegration_transition(self, db: Session, run: ReintegrationRun, action: Action) -> None:
         """Resolve a commit-before-Runtime crash window by readback, never command replay."""
-        desired = db.scalar(select(DesiredRouteState).where(DesiredRouteState.membership_id == action.membership_id))
-        observed = self.runtime.read(action.haproxy_backend, action.haproxy_server)
-        expected_admin = desired.admin_state if desired else None
-        expected_weight = desired.weight if desired else None
+        targets = self._reintegration_targets(action)
+        memberships = db.scalars(
+            select(RouteMembership).where(
+                RouteMembership.haproxy_backend.in_([backend for backend, _ in targets]),
+                RouteMembership.haproxy_server.in_([server for _, server in targets]),
+            )
+        ).all()
+        membership_by_target = {(row.haproxy_backend, row.haproxy_server): row for row in memberships}
+        desired_rows = {
+            row.membership_id: row
+            for row in db.scalars(
+                select(DesiredRouteState).where(
+                    DesiredRouteState.membership_id.in_(
+                        [membership_by_target[target].id for target in targets if target in membership_by_target]
+                    )
+                )
+            ).all()
+        }
+        readbacks = {
+            target: self.runtime.read(*target)
+            for target in targets
+        }
+        matches = all(
+            target in membership_by_target
+            and membership_by_target[target].id in desired_rows
+            and readbacks[target].get("admin_state") == desired_rows[membership_by_target[target].id].admin_state
+            and readbacks[target].get("weight") == desired_rows[membership_by_target[target].id].weight
+            for target in targets
+        )
+        expected_weight = next(iter(desired_rows.values())).weight if desired_rows else None
         pending = db.scalars(select(ReintegrationStage).where(ReintegrationStage.run_id == run.id, ReintegrationStage.status == "PENDING").order_by(ReintegrationStage.sequence)).all()
-        matching = next((item for item in pending if item.requested_weight == expected_weight), None)
-        matches = desired is not None and observed.get("admin_state") == expected_admin and observed.get("weight") == expected_weight
+        matching = (
+            next((item for item in pending if item.requested_weight == expected_weight), None)
+            if expected_weight is not None
+            else (pending[0] if pending else None)
+        )
         if matches and matching is not None:
             matching.status = "CURRENT"
             matching.started_at = utc_now()
-            matching.observed_weight = observed.get("weight")
+            matching.observed_weight = expected_weight
             run.current_stage = matching.name
             run.next_transition_at = utc_now() + timedelta(seconds=LAB_POLICY.reintegration_cooldown_seconds)
             run.version += 1
-            self._event(db, event_type="reintegration_progress", aggregate_type="reintegration", aggregate_id=run.id, aggregate_version=run.version, incident_id=run.incident_id, action_id=run.action_id, data={"status": run.status, "stage": matching.name, "restart_reconciliation": True, "blind_retry": False, "observed_weight": observed.get("weight")})
+            self._event(db, event_type="reintegration_progress", aggregate_type="reintegration", aggregate_id=run.id, aggregate_version=run.version, incident_id=run.incident_id, action_id=run.action_id, data={"status": run.status, "stage": matching.name, "restart_reconciliation": True, "blind_retry": False, "observed_weight": expected_weight, "targets": list(readbacks)})
         else:
             run.status = "NEEDS_REVIEW"
             run.current_stage = "NEEDS_REVIEW"
@@ -875,7 +1313,7 @@ class ControlWorker:
             incident = db.get(Incident, run.incident_id)
             incident.status = "NEEDS_REVIEW"
             incident.version += 1
-            self._event(db, event_type="drift_detected", aggregate_type="reintegration", aggregate_id=run.id, aggregate_version=run.version, incident_id=run.incident_id, action_id=run.action_id, data={"reason": "unfinished reintegration transition is ambiguous", "restart_reconciliation": True, "blind_retry": False, "desired": {"admin_state": expected_admin, "weight": expected_weight}, "observed": observed})
+            self._event(db, event_type="drift_detected", aggregate_type="reintegration", aggregate_id=run.id, aggregate_version=run.version, incident_id=run.incident_id, action_id=run.action_id, data={"reason": "unfinished reintegration transition is ambiguous", "restart_reconciliation": True, "blind_retry": False, "expected_weight": expected_weight, "observed": readbacks})
         self._commit_publish(db)
 
 

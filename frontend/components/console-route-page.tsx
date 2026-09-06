@@ -55,6 +55,7 @@ export function ConsoleRoutePage({ slug }: { slug: string[] }) {
   if (control.state === "live") {
     if (path === "traffic/matrix") return <div className="page-stack"><PageHeader eyebrow="Traffic" title="Route × instance matrix" brief="Each cell compares durable desired state with HAProxy Runtime readback and a bounded Prometheus evidence window." /><section className="panel matrix-command-panel"><LiveRouteMatrix /></section></div>;
     if (path === "incidents") return <LiveIncidents incidentId={parameters?.get("incident") ?? undefined} traceOnly={parameters?.get("trace") === "1"} />;
+    if (slug[0] === "incidents" && slug[1] && slug[2] === "decision-trace") return <LiveIncidents incidentId={slug[1]} traceOnly />;
     if (path === "actions") return <LiveActions actionId={parameters?.get("action") ?? undefined} />;
     if (path === "reintegration") return <LiveRecovery runId={parameters?.get("run") ?? undefined} />;
     if (path === "lab/faults") return <LiveFaultLab />;

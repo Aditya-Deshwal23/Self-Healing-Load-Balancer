@@ -1,6 +1,15 @@
 from __future__ import annotations
 
-from shlb_api.worker_policy import INSTANCES, LAB_POLICY, ROUTES, classify, instance_capacity, route_instance_capacity
+from shlb_api.worker_policy import (
+    INSTANCES,
+    LAB_POLICY,
+    ROUTES,
+    classify,
+    instance_capacity,
+    reintegration_cooldown_seconds,
+    reintegration_evidence_passes,
+    route_instance_capacity,
+)
 
 
 def evidence(*, failing: set[tuple[str, str]] | None = None, samples: int = 12) -> dict[str, dict]:
@@ -51,6 +60,56 @@ def test_accelerated_lab_timings_are_centralized_and_bounded() -> None:
     assert LAB_POLICY.peer_queue_limit < LAB_POLICY.harmful_queue_limit
 
 
+def test_reintegration_matrix_rejects_zero_sparse_harmful_and_flapping_verdicts() -> None:
+    phase_one_classes = (
+        "ROUTE_INSTANCE_FAILURE",
+        "INSTANCE_DOWN",
+        "INSTANCE_DEGRADED",
+        "SHARED_ROUTE_FAILURE",
+        "VERSION_SPECIFIC_FAILURE",
+        "TRAFFIC_OVERLOAD",
+    )
+    healthy = [{"samples": 8, "error_rate": 0.0}]
+    probes_ok = [{"application_ok": True}]
+    for _fault_class in phase_one_classes:
+        assert reintegration_evidence_passes(healthy, probes_ok, 3)
+        assert not reintegration_evidence_passes([{"samples": 0, "error_rate": 0.0}], probes_ok, 3)
+        assert not reintegration_evidence_passes([{"samples": 2, "error_rate": 0.0}], probes_ok, 3)
+        assert not reintegration_evidence_passes([{"samples": 8, "error_rate": 0.4}], probes_ok, 3)
+        assert not reintegration_evidence_passes(healthy, probes_ok, 3, harmful=True)
+        assert not reintegration_evidence_passes(healthy, [{"application_ok": False}], 3)
+
+
+def test_zero_sample_windows_never_pass_for_any_reintegration_scope() -> None:
+    scopes = ("ROUTE_INSTANCE", "COMPLETE_INSTANCE", "VERSION_GROUP", "COMPLETE_ROUTE", "OVERLOAD")
+    for _scope in scopes:
+        assert not reintegration_evidence_passes(
+            [{"samples": 0, "error_rate": None}],
+            [{"application_ok": True}],
+            1,
+        )
+
+
+def test_reintegration_flapping_uses_accelerated_exponential_cooldown() -> None:
+    assert reintegration_cooldown_seconds(0) == 3
+    assert reintegration_cooldown_seconds(1) == 6
+    assert reintegration_cooldown_seconds(2) == 12
+    assert reintegration_cooldown_seconds(10) == LAB_POLICY.reintegration_stage_timeout_seconds
+
+
+def test_reintegration_scope_restore_orders_are_distinct() -> None:
+    assert LAB_POLICY.reintegration_scope_orders["ROUTE_INSTANCE"] == ("dependency", "retries", "weights")
+    assert LAB_POLICY.reintegration_scope_orders["COMPLETE_INSTANCE"] == (
+        "critical_routes",
+        "diagnostic_routes",
+        "capacity",
+    )
+    assert LAB_POLICY.reintegration_scope_orders["VERSION_GROUP"] == ("canary", "cohort_batches")
+    assert LAB_POLICY.reintegration_scope_orders["COMPLETE_ROUTE"][-1] == "retries"
+    assert LAB_POLICY.reintegration_scope_orders["OVERLOAD"][-1] == "retries"
+    assert LAB_POLICY.reintegration_scope_orders["COMPLETE_ROUTE"] != LAB_POLICY.reintegration_scope_orders["ROUTE_INSTANCE"]
+
+
 def test_route_instance_requires_healthy_route_peers_and_instance_siblings() -> None:
     failed = {("checkout", "inst-b")}
     decision = classify(evidence(failing=failed), probes(failing=failed), [])
@@ -75,6 +134,34 @@ def test_instance_down_is_actionable_at_physical_scope() -> None:
     assert decision.actionable is True
     assert decision.route is None
     assert decision.instance == "inst-b"
+
+
+def test_instance_degraded_requires_two_routes_reachability_and_healthy_peers() -> None:
+    degraded = evidence()
+    for route in ("public", "auth"):
+        degraded[f"{route}/inst-b"] = {"samples": 12, "errors": 6, "error_rate": 0.5, "p95_ms": 20.0}
+    decision = classify(degraded, probes(), [])
+    assert decision.final_class == "INSTANCE_DEGRADED"
+    assert decision.actionable is True
+    assert decision.instance == "inst-b"
+    assert set(decision.support["affected_routes"]) == {"public", "auth"}
+
+    one_route = evidence()
+    one_route["public/inst-b"] = {"samples": 12, "errors": 6, "error_rate": 0.5, "p95_ms": 20.0}
+    assert classify(one_route, probes(), []).final_class == "UNKNOWN"
+
+    down = probes(failing={("public", "inst-b"), ("auth", "inst-b")})
+    assert classify(degraded, down, []).final_class == "INSTANCE_DOWN"
+
+
+def test_instance_degraded_accepts_elevated_populated_p95() -> None:
+    elevated = evidence()
+    for route in ("public", "auth"):
+        elevated[f"{route}/inst-b"] = {"samples": 12, "errors": 0, "error_rate": 0.0, "p95_ms": 10.0}
+        for peer in ("inst-a", "inst-c"):
+            elevated[f"{route}/{peer}"]["p95_ms"] = 2.0
+    decision = classify(elevated, probes(), [])
+    assert decision.final_class == "INSTANCE_DEGRADED"
 
 
 def test_conflict_and_missing_mandatory_comparison_are_unknown() -> None:

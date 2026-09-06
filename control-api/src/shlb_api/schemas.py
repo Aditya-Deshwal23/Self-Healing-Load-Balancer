@@ -199,7 +199,7 @@ class LabFaultCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     scenario: str = Field(
-        pattern=r"^(CHECKOUT_INST_B_FAILURE|INST_B_DOWN|SHARED_CHECKOUT_FAILURE|UNKNOWN_CONFLICT)$"
+        pattern=r"^(CHECKOUT_INST_B_FAILURE|INSTANCE_B_DEGRADED|INST_B_DOWN|SHARED_CHECKOUT_FAILURE|VERSION_V2_REGRESSION|UNKNOWN_CONFLICT)$"
     )
     duration_seconds: int = Field(default=120, ge=5, le=600)
 

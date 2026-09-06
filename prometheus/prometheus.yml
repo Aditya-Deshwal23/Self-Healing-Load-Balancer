@@ -20,6 +20,7 @@ scrape_configs:
           - demo-backend-a:8080
           - demo-backend-b:8080
           - demo-backend-c:8080
+          - demo-backend-d:8080
         labels:
           environment: local-lab
           service: demo-application

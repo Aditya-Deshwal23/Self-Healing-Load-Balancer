@@ -205,6 +205,10 @@ class RouteMembership(Base, TimestampMixin, VersionMixin):
         ForeignKey("backend_instances.id", ondelete="RESTRICT"),
         nullable=False,
     )
+    version_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("deployment_versions.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
     haproxy_backend: Mapped[str] = mapped_column(String(80), nullable=False)
     haproxy_server: Mapped[str] = mapped_column(String(80), nullable=False)
     baseline_weight: Mapped[int] = mapped_column(Integer, default=100, nullable=False)

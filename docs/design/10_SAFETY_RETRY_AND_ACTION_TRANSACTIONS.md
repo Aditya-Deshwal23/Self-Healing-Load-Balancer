@@ -223,21 +223,18 @@ State snapshots are structured typed values, not raw configuration text alone.
 ## 10. Action lifecycle
 
 ```text
-PLANNED
- -> SAFETY_CHECKED
- -> PREPARED
- -> APPLIED
- -> STATE_CONFIRMED
+PREPARED
  -> VERIFYING
  -> COMMITTED
 
 Terminal alternatives:
   ROLLED_BACK
-  SUPERSEDED
-  EXPIRED
-  CANCELLED_BEFORE_APPLY
+  ROLLBACK_FAILED
   NEEDS_REVIEW
+  RESULT_UNKNOWN
 ```
+
+For the MVP, `APPLIED` and `STATE_CONFIRMED` were collapsed into this simpler persisted state set.
 
 `ROLLING_BACK` is a nonterminal compensation state. `COMMITTED` means the incident mitigation is retained, not that the backend is healthy. Reintegration is a linked state machine.
 
@@ -351,4 +348,3 @@ incident -> observation windows -> fingerprint -> rules/ML outputs
 ```
 
 If any link is missing, the UI marks the Decision Trace incomplete. An LLM report cannot fill missing evidence.
-

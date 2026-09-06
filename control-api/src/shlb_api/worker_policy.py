@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 ROUTES = ("public", "auth", "catalog", "checkout")
-INSTANCES = ("inst-a", "inst-b", "inst-c")
+INSTANCES = ("inst-a", "inst-b", "inst-c", "inst-d")
 
 
 @dataclass(frozen=True)
@@ -24,6 +24,7 @@ class LabControlPolicy:
     instance_route_minimum_samples: int = 6
     peer_queue_limit: int = 5
     harmful_queue_limit: int = 10
+    degraded_p95_multiplier: float = 2.0
     minimum_physical_reserve_percent: int = 50
     action_expiry_seconds: int = 600
     verification_timeout_seconds: int = 45
@@ -39,6 +40,13 @@ class LabControlPolicy:
         ("100%", 100, 8),
         ("HEALTHY", 100, 1),
     )
+    reintegration_scope_orders: dict[str, tuple[str, ...]] = field(default_factory=lambda: {
+        "ROUTE_INSTANCE": ("dependency", "retries", "weights"),
+        "COMPLETE_INSTANCE": ("critical_routes", "diagnostic_routes", "capacity"),
+        "VERSION_GROUP": ("canary", "cohort_batches"),
+        "COMPLETE_ROUTE": ("dependency", "retry_suppression", "admission", "traffic", "protection", "retries"),
+        "OVERLOAD": ("queue_headroom", "admission", "traffic", "retries"),
+    })
 
 
 LAB_POLICY = LabControlPolicy()
@@ -46,6 +54,33 @@ FAILURE_RATE = LAB_POLICY.failure_rate
 HEALTHY_RATE = LAB_POLICY.healthy_rate
 TARGET_MINIMUM_SAMPLES = LAB_POLICY.target_minimum_samples
 CONTROL_MINIMUM_SAMPLES = LAB_POLICY.control_minimum_samples
+
+
+def reintegration_evidence_passes(
+    evidence_rows: list[dict],
+    probes: list[dict],
+    minimum_samples: int,
+    *,
+    harmful: bool = False,
+) -> bool:
+    """Require real samples, healthy probes, and no harmful verdict before promotion."""
+    if not evidence_rows or len(evidence_rows) != len(probes):
+        return False
+    if any(row.get("samples", 0) <= 0 or row.get("samples", 0) < minimum_samples for row in evidence_rows):
+        return False
+    if any(row.get("error_rate") is None or row["error_rate"] > HEALTHY_RATE for row in evidence_rows):
+        return False
+    if harmful or any(probe.get("application_ok") is not True for probe in probes):
+        return False
+    return True
+
+
+def reintegration_cooldown_seconds(flap_count: int) -> int:
+    """Use the accelerated lab base while retaining the documented exponential backoff."""
+    return min(
+        LAB_POLICY.reintegration_cooldown_seconds * (2 ** max(flap_count, 0)),
+        LAB_POLICY.reintegration_stage_timeout_seconds,
+    )
 
 
 @dataclass(frozen=True)
@@ -100,8 +135,50 @@ def classify(evidence: dict[str, dict], probes: dict[str, dict], conflicts: list
             [{"class": "ROUTE_INSTANCE_FAILURE", "rejected": "failure spans all routes on inst-b"}], True,
         )
 
+    for instance in INSTANCES:
+        target_members = {route: _member(evidence, route, instance) for route in ROUTES}
+        target_probes = {route: probes.get(f"{route}/{instance}", {}) for route in ROUTES}
+        populated_routes = [route for route, member in target_members.items() if member.get("samples", 0) >= CONTROL_MINIMUM_SAMPLES]
+        abnormal_routes = []
+        for route in populated_routes:
+            member = target_members[route]
+            peer_p95 = [
+                _member(evidence, route, peer).get("p95_ms")
+                for peer in INSTANCES
+                if peer != instance and _member(evidence, route, peer).get("p95_ms") is not None
+            ]
+            elevated_p95 = bool(member.get("p95_ms") is not None and peer_p95 and member["p95_ms"] >= max(peer_p95) * LAB_POLICY.degraded_p95_multiplier)
+            if _failing(member, CONTROL_MINIMUM_SAMPLES) or elevated_p95:
+                abnormal_routes.append(route)
+        peers_healthy = all(
+            _healthy(_member(evidence, route, peer), CONTROL_MINIMUM_SAMPLES)
+            for route in abnormal_routes
+            for peer in INSTANCES
+            if peer != instance
+        )
+        reachable = all(target_probes[route].get("reachable") is True and target_probes[route].get("application_ok") is True for route in ROUTES)
+        if len(abnormal_routes) >= 2 and peers_healthy and reachable:
+            return RuleDecision(
+                "INSTANCE_DEGRADED", None, instance, 0.95, completeness,
+                {
+                    "target": {route: target_members[route] for route in abnormal_routes},
+                    "affected_routes": abnormal_routes,
+                    "same_route_peers": {
+                        route: {peer: _member(evidence, route, peer) for peer in INSTANCES if peer != instance}
+                        for route in abnormal_routes
+                    },
+                    "direct_probes": target_probes,
+                    "endpoint_reachable": True,
+                },
+                [
+                    {"class": "INSTANCE_DOWN", "rejected": "target direct probes remain application_ok"},
+                    {"class": "ROUTE_INSTANCE_FAILURE", "rejected": "degradation spans multiple routes"},
+                ],
+                True,
+            )
+
     target = checkout["inst-b"]
-    peers_healthy = all(_healthy(checkout[instance], CONTROL_MINIMUM_SAMPLES) for instance in ("inst-a", "inst-c"))
+    peers_healthy = all(_healthy(checkout[instance], CONTROL_MINIMUM_SAMPLES) for instance in INSTANCES if instance != "inst-b")
     siblings_healthy = all(_healthy(instance_b_members[route], CONTROL_MINIMUM_SAMPLES) for route in ("public", "auth", "catalog"))
     target_probe = checkout_probes["inst-b"]
     comparison_probes = all(checkout_probes[instance].get("application_ok") is True for instance in ("inst-a", "inst-c")) and all(instance_b_probes[route].get("application_ok") is True for route in ("public", "auth", "catalog"))
@@ -110,13 +187,13 @@ def classify(evidence: dict[str, dict], probes: dict[str, dict], conflicts: list
             "ROUTE_INSTANCE_FAILURE", "checkout", "inst-b", 0.98, completeness,
             {
                 "target": target,
-                "same_route_peers": {key: checkout[key] for key in ("inst-a", "inst-c")},
+                "same_route_peers": {key: checkout[key] for key in INSTANCES if key != "inst-b"},
                 "same_instance_other_routes": {key: instance_b_members[key] for key in ("public", "auth", "catalog")},
                 "endpoint_reachable": True,
             },
             [
                 {"class": "INSTANCE_DOWN", "rejected": "three sibling routes on inst-b are healthy"},
-                {"class": "SHARED_ROUTE_FAILURE", "rejected": "checkout peers inst-a and inst-c are healthy"},
+                {"class": "SHARED_ROUTE_FAILURE", "rejected": "all checkout peers are healthy"},
             ],
             True,
         )

@@ -246,6 +246,8 @@ services:
         condition: service_healthy
       demo-backend-c:
         condition: service_healthy
+      demo-backend-d:
+        condition: service_healthy
     expose:
       - "8080"
       - "8404"
@@ -351,7 +353,13 @@ services:
     <<: *demo-backend
     environment:
       INSTANCE_ID: inst-c
-      VERSION_ID: demo-v1
+      VERSION_ID: demo-v2
+
+  demo-backend-d:
+    <<: *demo-backend
+    environment:
+      INSTANCE_ID: inst-d
+      VERSION_ID: demo-v2
 
 networks:
   data_edge_net:

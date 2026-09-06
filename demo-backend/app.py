@@ -197,6 +197,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json(HTTPStatus.NOT_FOUND, {"error": "unmapped_route", "path": path}, include_body=include_body)
             return
 
+        if fault and fault["kind"] == "instance_degraded" and route in {"public", "auth"}:
+            time.sleep(0.15)
         failed = self._fault_affects(route, fault)
         status = HTTPStatus.SERVICE_UNAVAILABLE if failed else HTTPStatus.OK
         payload = {
@@ -238,6 +240,8 @@ class Handler(BaseHTTPRequestHandler):
             return True
         if fault["kind"] == "route_failure" and fault.get("route") == route:
             return True
+        if fault["kind"] == "instance_degraded" and route in {"public", "auth"}:
+            return False
         # UNKNOWN is intentionally conflicting: real traffic succeeds while the
         # persisted ground truth says the evidence channel is unreliable.
         return False

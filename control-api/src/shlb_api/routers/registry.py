@@ -771,6 +771,7 @@ def create_membership(
     membership = RouteMembership(
         route_id=route.id,
         instance_id=payload.instance_id,
+        version_id=instance.version_id,
         haproxy_backend=payload.haproxy_backend,
         haproxy_server=payload.haproxy_server,
         baseline_weight=payload.baseline_weight,

@@ -59,10 +59,23 @@ export function LiveCommandCenter() {
 
   const data = summary.data;
   const action = trace.data?.action ?? data.current_action;
+  const actionConfirmed = Boolean(
+    action?.attempts?.some((item) =>
+      ["CONFIRMED", "ACKNOWLEDGEMENT_LOST_CONFIRMED"].includes(item.status),
+    ),
+  );
+  const actionDisplayState =
+    action && !actionConfirmed && ["COMMITTED", "VERIFYING"].includes(action.lifecycle)
+      ? "CONFIRMING"
+      : action?.lifecycle;
   const verification = trace.data?.verification;
   const recovery = trace.data?.recovery;
   const classification = trace.data?.classifications.at(-1);
-  const healthy = !activeIncident;
+  const verificationDisplayState =
+    verification && action && !actionConfirmed
+      ? "CONFIRMING"
+      : verification?.result;
+  const healthy = !activeIncident && !data.current_action;
 
   return (
     <div className="live-command-center page-stack">
@@ -217,7 +230,7 @@ export function LiveCommandCenter() {
                   [
                     "Action",
                     Boolean(action),
-                    action?.lifecycle ?? "Not selected",
+                    actionDisplayState ?? "Not selected",
                   ],
                   [
                     "Readback",
@@ -234,7 +247,7 @@ export function LiveCommandCenter() {
                   [
                     "Verification",
                     Boolean(verification),
-                    verification?.result ?? "Collecting",
+                    verificationDisplayState ?? "Collecting",
                   ],
                   [
                     "Recovery",
@@ -262,9 +275,9 @@ export function LiveCommandCenter() {
                 <ProgressBar
                   value={verification.sample_count}
                   max={Math.max(verification.sample_count, 20)}
-                  label={`Verification samples · ${verification.result}`}
+                  label={`Verification samples · ${verificationDisplayState}`}
                   tone={
-                    verification.result === "EFFECTIVE" ? "success" : "warning"
+                    verificationDisplayState === "EFFECTIVE" ? "success" : "warning"
                   }
                 />
               )}
@@ -327,19 +340,22 @@ export function LiveCommandCenter() {
               </div>
               <div>
                 <span>Lifecycle</span>
-                <strong>{action.lifecycle}</strong>
+                <strong>{actionDisplayState}</strong>
               </div>
               <div>
                 <span>Requested</span>
                 <strong>
-                  {String(action.requested_state.admin)} · w{" "}
+                  {String(action.requested_state.admin_state ?? action.requested_state.admin)} · w{" "}
                   {String(action.requested_state.weight)}
                 </strong>
               </div>
               <div>
                 <span>Verification</span>
                 <strong>
-                  {verification?.result ?? "Collecting real samples"}
+                  {verificationDisplayState ??
+                    (actionConfirmed
+                      ? "Collecting real samples"
+                      : "Confirming observed state")}
                 </strong>
               </div>
               <Link href={`/app/actions?action=${action.id}`}>

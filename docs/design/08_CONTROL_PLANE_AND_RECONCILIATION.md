@@ -293,25 +293,22 @@ flowchart LR
 
 ```mermaid
 stateDiagram-v2
-    [*] --> SUSPECTED: observation threshold crossed
-    SUSPECTED --> OBSERVING: create evidence windows
-    OBSERVING --> CLOSED_NO_ACTION: evidence clears
-    OBSERVING --> CLASSIFIED: supported class or UNKNOWN
-    CLASSIFIED --> REVIEW_REQUIRED: unknown, blocked, or manual policy
-    CLASSIFIED --> MITIGATING: safe action prepared
-    MITIGATING --> VERIFYING: observed HAProxy state confirmed
-    MITIGATING --> REVIEW_REQUIRED: partial apply or control failure
-    VERIFYING --> STABILIZED: action effective
+    [*] --> OPEN: incident detected
+    OPEN --> MITIGATING: safe action prepared
+    OPEN --> NEEDS_REVIEW: unknown, blocked, or manual policy
+    MITIGATING --> VERIFYING: observed state confirmed
+    MITIGATING --> NEEDS_REVIEW: partial apply or control failure
+    VERIFYING --> RECOVERING: action effective
     VERIFYING --> MITIGATING: safe alternative/replan
-    VERIFYING --> REVIEW_REQUIRED: harmful or insufficient evidence
-    STABILIZED --> REINTEGRATING: recovery evidence available
-    REINTEGRATING --> STABILIZED: stage fails; quarantine restored
-    REINTEGRATING --> RESOLVED: 100 percent verified
-    REVIEW_REQUIRED --> MITIGATING: approved new action
-    REVIEW_REQUIRED --> RESOLVED: operator resolves with evidence
-    CLOSED_NO_ACTION --> [*]
+    VERIFYING --> NEEDS_REVIEW: harmful or insufficient evidence
+    RECOVERING --> VERIFYING: recovery stage requires more evidence
+    RECOVERING --> RESOLVED: recovery fully verified
+    NEEDS_REVIEW --> MITIGATING: approved new action
+    NEEDS_REVIEW --> RESOLVED: operator resolves with evidence
     RESOLVED --> [*]
 ```
+
+For the MVP, the earlier incident phases were collapsed into this simpler six-state persisted set.
 
 **Explanation:** `UNKNOWN` can be classified but routes to review rather than automatic mitigation. An incident is resolved only after recovery or an explicit evidence-backed operator resolution, not when an alert is merely acknowledged.
 
