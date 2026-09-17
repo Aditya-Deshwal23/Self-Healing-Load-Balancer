@@ -1,0 +1,25 @@
+global:
+  scrape_interval: 2s
+  scrape_timeout: 1s
+  evaluation_interval: 2s
+
+scrape_configs:
+  - job_name: haproxy
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["traffic-haproxy:8404"]
+        labels:
+          environment: local-lab
+          service: demo-application
+
+  - job_name: demo-backends
+    metrics_path: /metrics
+    honor_labels: true
+    static_configs:
+      - targets:
+          - demo-backend-a:8080
+          - demo-backend-b:8080
+          - demo-backend-c:8080
+        labels:
+          environment: local-lab
+          service: demo-application

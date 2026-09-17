@@ -1,0 +1,9 @@
+flowchart TD
+    Failure[Backend route failure] --> Check[Metrics and direct probe fail]
+    Check --> Detect[Rule engine detects supported condition]
+    Detect --> Worker[Control worker drains route membership]
+    Worker --> Verify[HAProxy readback and real-traffic verification]
+    Verify --> Clear[Fault is cleared]
+    Clear --> Restore[Staged traffic restoration]
+    Restore --> Pass[Health checks and probes pass]
+    Pass --> Traffic[Traffic restored]

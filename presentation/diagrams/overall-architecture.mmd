@@ -1,0 +1,10 @@
+flowchart TD
+    User[User or client] --> NGINX[NGINX HTTPS edge]
+    NGINX --> HAProxy[HAProxy]
+    HAProxy --> Backends[Backend services A, B, C]
+    Backends --> Monitoring[Prometheus metrics and direct probes]
+    HAProxy --> Monitoring
+    Monitoring --> Rules[Deterministic rule engine]
+    Rules --> Worker[Single control worker]
+    Worker --> Runtime[HAProxy Runtime action]
+    Runtime --> Recovered[Recovered route membership]

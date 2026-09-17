@@ -1,0 +1,5 @@
+flowchart LR
+    Services[Services] --> Stdout[stdout / structured logs]
+    Stdout --> Docker[Docker json-file logging]
+    Docker --> Inspect[docker compose logs]
+    Note[ELK is not implemented] -. current scope .-> Docker

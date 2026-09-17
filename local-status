@@ -1,0 +1,12 @@
+#!/bin/sh
+set -eu
+
+project_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+. "$project_dir/scripts/local-lib.sh"
+cd "$project_dir"
+lan_ip=$(detect_lan_ip)
+docker compose ps
+printf '\nLAN URL: https://%s:8443\n' "$lan_ip"
+printf 'Published ports (expected only 8080 and 8443):\n'
+docker compose port edge-nginx 8080
+docker compose port edge-nginx 8443

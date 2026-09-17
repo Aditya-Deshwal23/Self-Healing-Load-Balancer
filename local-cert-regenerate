@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+
+project_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+. "$project_dir/scripts/local-lib.sh"
+cd "$project_dir"
+lan_ip=$(prepare_local_environment)
+generate_certificate "$lan_ip"
+printf 'Regenerated .local-certs/lab.crt for localhost, 127.0.0.1, and %s.\n' "$lan_ip"
+if docker compose ps -q edge-nginx 2>/dev/null | grep -q .; then
+    docker compose up -d --force-recreate --no-deps edge-nginx
+    printf 'Recreated edge-nginx to load the new certificate.\n'
+fi

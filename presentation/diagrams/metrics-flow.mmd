@@ -1,0 +1,6 @@
+flowchart LR
+    Services[HAProxy and backend services] --> Collector[Prometheus]
+    Traffic[Traffic generator] --> HAProxy[HAProxy]
+    HAProxy --> Collector
+    Collector --> Worker[Control worker queries evidence]
+    Worker --> Dashboard[API and web dashboard]
