@@ -1,9 +1,12 @@
 # Self Healing Load Balancer — Product Experience & Interface Design
 
-Status: final UI/UX direction  
-Canonical frontend design authority: this document  
+> **⚠️ STATUS NOTE (2026-09-17):** This document is **superseded** as the implementation authority. The shipped console uses a warm "copper" design system documented in `CONTEXT/ui-context.md` and implemented in `frontend/app/globals.css` — not the "Quiet OLED" / indigo / charcoal direction described in Section 4 below. The installed fonts are `@fontsource-variable/source-sans-3` (Source Sans 3) and `@fontsource/ibm-plex-mono` (IBM Plex Mono) — not Geist. The styling is hand-authored semantic CSS with no framework; `shadcn/ui`, `tailwindcss`, and `framer-motion` are **not installed** in `frontend/package.json`. For all new frontend work, read `CONTEXT/ui-context.md` first. The experience principles (Sections 2–3.3) and the telemetry boundary (Section 3) remain valid product intent and are preserved here. See ADR-023 in `docs/design/20_RISK_REGISTER_AND_DECISION_LOG.md` for the formal reconciliation record.
+
+Status: ~~final UI/UX direction~~ superseded — see note above  
+Canonical frontend design authority: `CONTEXT/ui-context.md`  
 Applies to: operator console, research console, setup, and incident review  
-Implementation target: Next.js, TypeScript, Tailwind CSS, shadcn/ui primitives, Framer Motion, TanStack Query, SSE
+Implementation target: Next.js, TypeScript, hand-authored CSS (no framework), TanStack Query, SSE — ~~Tailwind CSS, shadcn/ui primitives, Framer Motion~~ not installed
+
 
 ## 1. The product should feel like an explanation, not an instrument panel
 

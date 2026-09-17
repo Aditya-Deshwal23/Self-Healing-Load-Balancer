@@ -1,6 +1,8 @@
 # Frontend and Product Experience Specification
 
-`FRONTEND_UX_DESIGN.md` at the repository root is the canonical implementation design. This dossier chapter records the frozen product contract and must be interpreted consistently with that document.
+> **⚠️ STATUS NOTE (2026-09-17):** The reference to `FRONTEND_UX_DESIGN.md` as "canonical implementation design" is superseded. The authoritative source for visual system, theme, fonts, and component library is now `CONTEXT/ui-context.md`. The shipped console uses the warm "copper" design system, Source Sans 3 / IBM Plex Mono fonts, and hand-authored semantic CSS. `shadcn/ui`, Geist typography, and the OLED/charcoal/indigo color system described in Sections 3.1–3.4 below were never implemented. The product experience principles and information architecture (Sections 1–2) remain accurate. See ADR-023 in `docs/design/20_RISK_REGISTER_AND_DECISION_LOG.md`.
+
+~~`FRONTEND_UX_DESIGN.md` at the repository root is the canonical implementation design.~~ See status note above. This dossier chapter records the frozen product contract and must be interpreted consistently with `CONTEXT/ui-context.md`.
 
 ## 1. Experience objective
 

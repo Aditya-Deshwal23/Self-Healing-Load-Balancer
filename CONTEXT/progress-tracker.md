@@ -93,3 +93,4 @@ Update this file after every meaningful implementation change.
 - The single call site for `classify()` and for `_observe()` is
   `ControlWorker.tick()` — both already updated; no other module
   calls either function
+- [2026-09-17] Completed documentation and dead-code alignment pass; deleted unused `encode_secret_for_file` and unused imports, added ADR-023, and added status notes to stale architectural docs.

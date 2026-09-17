@@ -4,7 +4,7 @@ import uuid
 from datetime import timedelta
 
 from fastapi import APIRouter, Depends, Header, Request, Response
-from sqlalchemy import and_, func, select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from shlb_api.api_helpers import etag, publish_after_commit, require_if_match
@@ -26,7 +26,6 @@ from shlb_api.models import (
     LabFault,
     ObservationWindow,
     ObservedStateSnapshot,
-    Project,
     ReintegrationRun,
     ReintegrationStage,
     RouteGroup,

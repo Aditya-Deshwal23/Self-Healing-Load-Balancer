@@ -247,3 +247,16 @@ Before superseding any accepted decision, record:
 9. owner, reviewer, date, and release boundary.
 
 No new technology is accepted because it is fashionable or makes a diagram look more advanced.
+
+### ADR-023 — Phase 1 completion, UI theme reconciliation, and CONTEXT/ folder (2026-09-17)
+
+- **Status:** Accepted.
+- **Date:** 2026-09-17
+- **Decision (a) — Phase 1 HYBRID_SHADOW wiring complete:**
+  `classify()` in `control-api/src/shlb_api/worker_policy.py` is now generalized across the full route×instance topology — no hardcoded flagship cell. A `statistical_support` parameter was added; the fast-path EWMA signal (`FastPathController`, `fastpath.py`) is wired in under `LAB_POLICY.hybrid_shadow_enabled` as purely advisory evidence, recorded in every decision's `support` payload as `shadow_statistical_signal`. The signal is structurally unable to change `final_class` or `actionable`. This is enforced by a dedicated test — `test_statistical_support_is_advisory_and_never_changes_actionability` — in `control-api/tests/test_worker_policy.py`. Total test count after Phase 1: 22/22 passing, 0 regressions. No new Alembic migration was needed; the shadow signal travels through the existing `Classification.evidence_support` JSON column per the Phase 1 architecture decision.
+- **Decision (b) — UI theme/font/library baseline locked to shipped copper system:**
+  `FRONTEND_UX_DESIGN.md` described a "Quiet OLED" direction (deep OLED/charcoal, indigo accent, Geist typography, shadcn/ui, Framer Motion) that was never implemented. The actual shipped console uses a warm "copper" theme in `frontend/app/globals.css` (light `:root` + `[data-theme="dark"]`), Source Sans 3 Variable and IBM Plex Mono fonts (both bundled via `@fontsource-variable/source-sans-3` and `@fontsource/ibm-plex-mono`), and hand-authored semantic CSS with no CSS framework, no shadcn/ui, and no Framer Motion. `CONTEXT/ui-context.md` is now the authoritative reference for all visual/theme/component-library decisions. `FRONTEND_UX_DESIGN.md` is superseded on any point where it disagrees with `ui-context.md`. ADR-022's visual system description (OLED/charcoal/Geist) reflects the discarded direction and should not be cited as guidance for new work.
+- **Decision (c) — CONTEXT/ folder introduced as living spec source:**
+  The six files under `CONTEXT/` (`project-overview.md`, `architecture.md`, `code-standards.md`, `ui-context.md`, `ai-workflow-rules.md`, `progress-tracker.md`) are the current, verified source of truth for scope, architecture, UI, and conventions. Where anything elsewhere in the repository contradicts them, the CONTEXT/ files take precedence. The frozen ADR dossier (`docs/design/`) remains authoritative for recorded decisions; new decisions are recorded here as new ADR entries, not silent edits.
+- **Rationale:** Phase 1 is complete and unit-tested; the UI direction has diverged from the original design doc and needed explicit reconciliation; a single authoritative spec location prevents future contradictions between implementation and documentation.
+- **Owner:** Engineering team. **Reviewer:** All members.

@@ -2,7 +2,7 @@
 
 This repository is a compact local-network prototype of Evidence-Bounded Minimum-Scope Healing (EBMSH). It demonstrates a deliberately narrow claim: when checkout fails only on one physical backend, the controller can prove the scope, quarantine only that route membership in HAProxy, verify both symptom relief and unaffected-route preservation, then restore traffic through evidence-gated stages.
 
-The flagship path is real. It uses generated traffic, backend request metrics, direct probes, PostgreSQL records, a sole-writer worker, HAProxy Runtime commands and Runtime readback. The local Compose profile also includes an internal Elasticsearch/Logstash/Kibana forensic stream: NGINX and HAProxy emit structured syslog events to Logstash, which indexes them in Elasticsearch for correlation and investigation. ML, Ollama and LLM-generated recommendations are intentionally not required for operation.
+The core healing path is real and generalized across the full route×instance topology. It uses generated traffic, backend request metrics, direct probes, PostgreSQL records, a sole-writer worker, HAProxy Runtime commands and Runtime readback. The local Compose profile also includes an internal Elasticsearch/Logstash/Kibana forensic stream: NGINX and HAProxy emit structured syslog events to Logstash, which indexes them in Elasticsearch for correlation and investigation. ML, Ollama and LLM-generated recommendations are intentionally not required for operation; the EWMA statistical signal runs as an advisory-only shadow alongside deterministic rules.
 
 ## Start the local LAB
 
@@ -159,7 +159,7 @@ SSE publishes incident, classification, action, verification, reintegration, rol
 
 ## Operator console
 
-The primary rail has seven destinations: Overview, Traffic, Incidents, Actions, Recovery, Lab and System. Existing contextual export routes are preserved, but unsupported Phase-2 pages are capability-gated and do not compete with the working workflow.
+The primary rail has six destinations: Command, Traffic, Response, Evidence, Research Lab, and Configuration. Existing contextual export routes are preserved, but unsupported Phase-2 pages are capability-gated and do not compete with the working workflow.
 
 Ordinary LAB mode uses real REST/SSE data for:
 
@@ -217,4 +217,4 @@ docs/design/       frozen architecture/specification dossier
 
 ## Explicit limits
 
-The current prototype genuinely supports `HEALTHY`, `INSTANCE_DOWN`, `ROUTE_INSTANCE_FAILURE`, `SHARED_ROUTE_FAILURE` and `UNKNOWN` with deterministic rules. Statistical instance degradation, traffic overload control, version-specific classification, ML, ELK, local LLM assistance, multi-node HA, production autoscaling and the full research protocol remain planned and are labelled as unsupported rather than simulated as live capability.
+The current prototype genuinely supports `HEALTHY`, `INSTANCE_DOWN`, `ROUTE_INSTANCE_FAILURE`, `SHARED_ROUTE_FAILURE` and `UNKNOWN` with deterministic rules. The EWMA fast-path signal for statistical instance degradation is wired in advisory-only shadow mode. Traffic overload control, version-specific classification, ML, ELK, local LLM assistance, multi-node HA, production autoscaling and the full research protocol remain planned and are labelled as unsupported rather than simulated as live capability.

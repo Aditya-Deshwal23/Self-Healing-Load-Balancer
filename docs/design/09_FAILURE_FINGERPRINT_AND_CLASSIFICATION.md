@@ -264,6 +264,12 @@ TRAFFIC_OVERLOAD requires:
 
 Policies define “predominantly,” sample minimums, and deviations; lab defaults are validated, not universal.
 
+---
+
+> **📍 IMPLEMENTATION STATUS (2026-09-17):** Sections 11 (deterministic rule layer) and 12–20 (ML candidates through acceptance gate) describe the design intent. As of Phase 1 (complete): the deterministic rule layer (Section 11) is **implemented and generalized** — `classify()` in `worker_policy.py` evaluates every cell in the full route×instance topology with no hardcoded flagship scenario. The HYBRID_SHADOW fast-path signal is **wired in** as a purely advisory EWMA passthrough (`FastPathController` output, recorded as `shadow_statistical_signal` in `Classification.evidence_support`), verified by a dedicated safety test. A trained ML classifier (Logistic Regression, Random Forest — Sections 12–19) is **not yet started**; the full feature-extraction pipeline, training dataset, calibration, and model versioning described below remain future phases. The HYBRID_SHADOW → HYBRID_ACTIVE promotion gate (Section 20) is also future.
+
+---
+
 ## 12. ML candidates
 
 | Approach | Strength | Weakness | Decision |

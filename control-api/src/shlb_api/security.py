@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 import hashlib
 import hmac
 import json
@@ -100,6 +99,3 @@ def decode_session(value: str) -> dict[str, Any]:
 def unix_time() -> int:
     return int(datetime.now(UTC).timestamp())
 
-
-def encode_secret_for_file(raw: bytes) -> str:
-    return base64.urlsafe_b64encode(raw).decode("ascii")
