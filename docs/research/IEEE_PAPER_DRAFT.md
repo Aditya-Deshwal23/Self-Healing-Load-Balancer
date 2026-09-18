@@ -93,15 +93,19 @@ durable anomaly event minus fault activation, and MTTR as the first confirmed
 attenuation/readback event minus activation. Report median and 95% confidence
 interval over independent runs.
 
-> **📍 IMPLEMENTATION STATUS (2026-09-17):** As of Phase 1 (complete), the
+> **📍 IMPLEMENTATION STATUS (2026-09-18):** As of Phase 1 (complete), the
 > HYBRID_SHADOW fast-path EWMA signal is wired into the worker pipeline and
 > records `shadow_statistical_signal` in every `Classification.evidence_support`
 > payload — the signal is advisory-only and verified never to change
 > `final_class` or `actionable`. The `benchmarks/run_experiments.py` script
-> exists but the B1–B4 ablation runs have not yet been executed against the
-> live Compose stack. The MTTD_shadow-vs-MTTD_rules extraction and the
-> empirical numbers for the H_new ablation remain pending. `experiments/manifest.json`
-> has not yet been created.
+> currently runs the round-robin, gray-failure-without-SHLB, and
+> gray-failure-with-SHLB scenarios; the required B1–B4 baseline ablation runs
+> have not been implemented or executed against the live Compose stack. The
+> schema-based MTTD extraction is available in
+> `benchmarks/extract_mttd_shadow_vs_rules.sql`, but no empirical result exists
+> yet because the Compose services are not healthy. The query reads the
+> pre-incident `fast_path_recommendations` persisted in observation-window
+> metrics. `experiments/manifest.json` has not yet been created.
 
 No empirical number is asserted in this draft until the CSV is generated from
 the target hardware and software versions.

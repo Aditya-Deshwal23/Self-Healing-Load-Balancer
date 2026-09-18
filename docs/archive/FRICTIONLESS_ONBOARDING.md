@@ -1,3 +1,5 @@
+Archived: describes a multi-tenant SaaS overlay model out of scope for the current single-environment lab prototype (see CONTEXT/project-overview.md). Kept for historical reference only.
+
 # SHLB Frictionless Onboarding and Edge Overlay
 
 ## Product boundary

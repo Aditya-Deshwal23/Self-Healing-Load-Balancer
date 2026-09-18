@@ -1,3 +1,5 @@
+Archived: out of scope for the current single-environment lab prototype and the Phase 1 rule-only implementation (see CONTEXT/project-overview.md and CONTEXT/architecture.md). Kept for historical reference only.
+
 # SHLB Interactive Presentation Sandbox
 
 ## Purpose and boundary
