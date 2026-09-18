@@ -202,6 +202,8 @@ class ControlWorker:
         publish_pending_outbox(db, self.redis, project_id=IDS["project"])
 
     def _fault_targets(self, fault: LabFault) -> tuple[list[str], str, str | None]:
+        if fault.scenario == "AUTH_INST_A_FAILURE":
+            return ["inst-a"], "route_failure", "auth"
         if fault.scenario == "GRAY_FAILURE_INST_A":
             return ["inst-a"], "gray_failure", None
         if fault.scenario == "CHECKOUT_INST_B_FAILURE":
@@ -252,16 +254,24 @@ class ControlWorker:
         probes = self.probes.probes()
         memberships = self.runtime.memberships()
         fast_samples = self.runtime.fast_samples()
-        active_capacity = sum(1 for item in memberships if item["weight"] > 0 and item["admin_state"] == "ready")
         now = utc_now()
         fast_recommendations: dict[str, dict] = {}
         if LAB_POLICY.hybrid_shadow_enabled:
             for key, sample in fast_samples.items():
+                route = key.split("/", 1)[0]
+                route_active_capacity = sum(
+                    1
+                    for item in memberships
+                    if item["backend"] == f"be_{route}"
+                    and item["weight"] > 0
+                    and item["admin_state"] == "ready"
+                )
+                error_rate = sample["errors_5xx"] / sample["sessions"] if sample.get("sessions") else 0.0
                 recommendation = self.fastpath.observe(
                     key,
                     latency_ms=sample["latency_ms"],
-                    error_rate=0.0,
-                    active_capacity=active_capacity,
+                    error_rate=error_rate,
+                    active_capacity=route_active_capacity,
                     total_capacity=len(INSTANCES),
                 )
                 if recommendation is None:
@@ -314,7 +324,7 @@ class ControlWorker:
             return incident, certificate
         now = utc_now()
         summary_map = {
-            "ROUTE_INSTANCE_FAILURE": "Checkout fails only on inst-b while peers and sibling routes remain healthy.",
+            "ROUTE_INSTANCE_FAILURE": f"{decision.route} fails only on {decision.instance} while peers and sibling routes remain healthy.",
             "SHARED_ROUTE_FAILURE": "Checkout fails across all physical instances; mass ejection is prohibited.",
             "INSTANCE_DOWN": "All registered routes on inst-b fail direct application probes.",
             "UNKNOWN": "Evidence is conflicting or incomplete; destructive action is prohibited.",
@@ -331,12 +341,12 @@ class ControlWorker:
         safety = {"evaluated": False, "reason": "class is not actionable"}
         candidates = [{"unit": "NO_ACTION", "result": "selected", "reason": "UNKNOWN/shared scope cannot actuate"}]
         if decision.final_class == "ROUTE_INSTANCE_FAILURE":
-            queues = {item["server"].removeprefix("srv_").replace("_", "-"): item["queue"] for item in self.runtime.memberships() if item["backend"] == "be_checkout"}
-            safety = route_instance_capacity(capacities={key: 100 for key in INSTANCES}, target_instance="inst-b", queues=queues, minimum_reserve_percent=LAB_POLICY.minimum_physical_reserve_percent)
+            queues = {item["server"].removeprefix("srv_").replace("_", "-"): item["queue"] for item in self.runtime.memberships() if item["backend"] == f"be_{decision.route}"}
+            safety = route_instance_capacity(capacities={key: 100 for key in INSTANCES}, target_instance=decision.instance, queues=queues, minimum_reserve_percent=LAB_POLICY.minimum_physical_reserve_percent)
             candidates = [
-                {"unit": "ROUTE_INSTANCE", "targets": ["be_checkout/srv_inst_b"], "result": "selected" if safety["allowed"] else "rejected", "reason": "smallest supported scope" if safety["allowed"] else "capacity or queue guard failed"},
-                {"unit": "INSTANCE", "targets": ["all inst-b memberships"], "result": "rejected", "reason": "healthy public/auth/catalog memberships would be displaced"},
-                {"unit": "SHARED_ROUTE", "targets": ["all checkout memberships"], "result": "rejected", "reason": "checkout peers remain healthy"},
+                {"unit": "ROUTE_INSTANCE", "targets": [f"be_{decision.route}/srv_{decision.instance.replace('-', '_')}"], "result": "selected" if safety["allowed"] else "rejected", "reason": "smallest supported scope" if safety["allowed"] else "capacity or queue guard failed"},
+                {"unit": "INSTANCE", "targets": [f"all {decision.instance} memberships"], "result": "rejected", "reason": f"healthy {', '.join(route for route in ROUTES if route != decision.route)} memberships would be displaced"},
+                {"unit": "SHARED_ROUTE", "targets": [f"all {decision.route} memberships"], "result": "rejected", "reason": f"{decision.route} peers remain healthy"},
             ]
         elif decision.final_class == "INSTANCE_DOWN":
             current = self.runtime.memberships()
@@ -371,15 +381,21 @@ class ControlWorker:
         existing = db.scalar(select(Action).where(Action.incident_id == incident.id).limit(1))
         if existing:
             return
-        membership = db.scalar(select(RouteMembership).where(RouteMembership.route_id == ROUTE_IDS["checkout"], RouteMembership.instance_id == INSTANCE_IDS["inst-b"]))
+        route = next((name for name, route_id in ROUTE_IDS.items() if route_id == incident.route_id), None)
+        instance = next((name for name, instance_id in INSTANCE_IDS.items() if instance_id == incident.instance_id), None)
+        if route is None or instance is None:
+            raise RuntimeError("route-instance incident has an unknown registered scope")
+        membership = db.scalar(select(RouteMembership).where(RouteMembership.route_id == ROUTE_IDS[route], RouteMembership.instance_id == INSTANCE_IDS[instance]))
         if membership is None:
-            raise RuntimeError("registered checkout/inst-b membership is missing")
+            raise RuntimeError(f"registered {route}/{instance} membership is missing")
         before = next(item for item in memberships if item["backend"] == membership.haproxy_backend and item["server"] == membership.haproxy_server)
         desired = db.scalar(select(DesiredRouteState).where(DesiredRouteState.membership_id == membership.id))
         if desired is None:
             raise RuntimeError("durable desired state is missing")
         now = utc_now()
-        action = Action(environment_id=incident.environment_id, incident_id=incident.id, evidence_certificate_id=certificate.id, membership_id=membership.id, action_kind="ROUTE_MEMBERSHIP_QUARANTINE", lifecycle="PREPARED", controller_generation=self.generation, haproxy_backend=membership.haproxy_backend, haproxy_server=membership.haproxy_server, previous_desired={"admin_state": desired.admin_state, "weight": desired.weight}, previous_observed=before, requested_state={"admin_state": "drain", "weight": 0}, expected_effect="Remove only checkout/inst-b from eligible checkout selections while preserving inst-b public/auth/catalog.", preservation_set=["be_public/srv_inst_b", "be_auth/srv_inst_b", "be_catalog/srv_inst_b", "be_checkout/srv_inst_a", "be_checkout/srv_inst_c"], verification_criteria={"checkout_error_rate_max": LAB_POLICY.healthy_rate, "minimum_real_samples": LAB_POLICY.route_verification_minimum_samples, "peer_queue_max": LAB_POLICY.peer_queue_limit, "preserved_error_rate_max": LAB_POLICY.healthy_rate}, rollback_strategy={"admin_state": desired.admin_state, "weight": desired.weight, "trigger": ["INEFFECTIVE", "HARMFUL", "READBACK_MISMATCH"]}, idempotency_key=f"controller-g{self.generation}:{incident.id}:checkout-inst-b", expires_at=now + timedelta(seconds=LAB_POLICY.action_expiry_seconds))
+        preserved_route_targets = [f"be_{other_route}/srv_{instance.replace('-', '_')}" for other_route in ROUTES if other_route != route]
+        preserved_peer_targets = [f"be_{route}/srv_{other_instance.replace('-', '_')}" for other_instance in INSTANCES if other_instance != instance]
+        action = Action(environment_id=incident.environment_id, incident_id=incident.id, evidence_certificate_id=certificate.id, membership_id=membership.id, action_kind="ROUTE_MEMBERSHIP_QUARANTINE", lifecycle="PREPARED", controller_generation=self.generation, haproxy_backend=membership.haproxy_backend, haproxy_server=membership.haproxy_server, previous_desired={"admin_state": desired.admin_state, "weight": desired.weight}, previous_observed=before, requested_state={"admin_state": "drain", "weight": 0}, expected_effect=f"Remove only {route}/{instance} from eligible {route} selections while preserving other {instance} routes.", preservation_set=preserved_route_targets + preserved_peer_targets, verification_criteria={"route_error_rate_max": LAB_POLICY.healthy_rate, "minimum_real_samples": LAB_POLICY.route_verification_minimum_samples, "peer_queue_max": LAB_POLICY.peer_queue_limit, "preserved_error_rate_max": LAB_POLICY.healthy_rate}, rollback_strategy={"admin_state": desired.admin_state, "weight": desired.weight, "trigger": ["INEFFECTIVE", "HARMFUL", "READBACK_MISMATCH"]}, idempotency_key=f"controller-g{self.generation}:{incident.id}:{route}-{instance}", expires_at=now + timedelta(seconds=LAB_POLICY.action_expiry_seconds))
         db.add(action)
         db.flush()
         desired.admin_state = "drain"
@@ -418,14 +434,14 @@ class ControlWorker:
                 self._commit_publish(db)
                 return
         after = self.runtime.memberships()
-        siblings_before = {(item["backend"], item["server"]): (item["admin_state"], item["weight"]) for item in memberships if item["server"] == "srv_inst_b" and item["backend"] != "be_checkout"}
-        siblings_after = {(item["backend"], item["server"]): (item["admin_state"], item["weight"]) for item in after if item["server"] == "srv_inst_b" and item["backend"] != "be_checkout"}
+        siblings_before = {(item["backend"], item["server"]): (item["admin_state"], item["weight"]) for item in memberships if item["server"] == membership.haproxy_server and item["backend"] != membership.haproxy_backend}
+        siblings_after = {(item["backend"], item["server"]): (item["admin_state"], item["weight"]) for item in after if item["server"] == membership.haproxy_server and item["backend"] != membership.haproxy_backend}
         preserved = siblings_before == siblings_after
         confirmed = observed.get("admin_state") == "drain" and observed.get("weight") == 0 and preserved
         attempt.completed_at = utc_now()
         if confirmed and attempt.status == "ACKNOWLEDGED":
             attempt.status = "CONFIRMED"
-        attempt.observed_state = {"target": observed, "inst_b_other_memberships_preserved": preserved, "siblings": {f"{backend}/{server}": {"admin_state": state[0], "weight": state[1]} for (backend, server), state in siblings_after.items()}}
+        attempt.observed_state = {"target": observed, "same_instance_other_routes_preserved": preserved, "siblings": {f"{backend}/{server}": {"admin_state": state[0], "weight": state[1]} for (backend, server), state in siblings_after.items()}}
         action.lifecycle = "VERIFYING" if confirmed else "NEEDS_REVIEW"
         action.version += 1
         incident.status = "VERIFYING" if confirmed else "NEEDS_REVIEW"
@@ -594,14 +610,16 @@ class ControlWorker:
         if action.action_kind == "INSTANCE_QUARANTINE":
             self._verify_instance_action(db, action, evidence, memberships)
             return
-        checkout_members = [evidence[f"checkout/{instance}"] for instance in INSTANCES]
-        affected_samples = sum(item["samples"] for item in checkout_members)
-        affected_errors = sum(item["errors"] for item in checkout_members)
+        route = action.haproxy_backend.removeprefix("be_")
+        instance = action.haproxy_server.removeprefix("srv_").replace("_", "-")
+        route_members = [evidence[f"{route}/{member_instance}"] for member_instance in INSTANCES]
+        affected_samples = sum(item["samples"] for item in route_members)
+        affected_errors = sum(item["errors"] for item in route_members)
         affected_rate = affected_errors / affected_samples if affected_samples else None
-        preserved = {route: evidence[f"{route}/inst-b"] for route in ("public", "auth", "catalog")}
+        preserved = {other_route: evidence[f"{other_route}/{instance}"] for other_route in ROUTES if other_route != route}
         preservation_samples = sum(item["samples"] for item in preserved.values())
         preservation_ok = all(item["samples"] >= LAB_POLICY.control_minimum_samples and item["error_rate"] is not None and item["error_rate"] <= LAB_POLICY.healthy_rate for item in preserved.values())
-        peer_queues = {item["server"]: item["queue"] for item in memberships if item["backend"] == "be_checkout" and item["server"] != "srv_inst_b"}
+        peer_queues = {item["server"]: item["queue"] for item in memberships if item["backend"] == action.haproxy_backend and item["server"] != action.haproxy_server}
         queue_ok = all(value <= LAB_POLICY.peer_queue_limit for value in peer_queues.values())
         target = next((item for item in memberships if item["backend"] == action.haproxy_backend and item["server"] == action.haproxy_server), {})
         aligned = target.get("admin_state") == "drain" and target.get("weight") == 0

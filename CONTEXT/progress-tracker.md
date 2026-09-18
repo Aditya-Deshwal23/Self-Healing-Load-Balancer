@@ -37,6 +37,31 @@ Update this file after every meaningful implementation change.
   `routers/operations.py`, ADR-023 and the theme/status notes are
   present, and the README/docs already reflect the Phase 1 +
   `CONTEXT/` authority reconciliation
+- Fixed `_observe()` fast-path capacity to be computed per sampled
+  route and verified the full 40-test control API suite in Compose
+  with secrets and database access available
+- Verified the live flagship fault path end to end after fixing the
+  demo backend route-fault `UnboundLocalError`: incident persistence,
+  route-local quarantine, sibling-route preservation, reintegration,
+  and resolution all pass
+- Reviewed HLD/LLD against design docs 06–08; retained both because
+  they contain unique operational, security, runtime, RCA, and
+  resource-envelope detail. Restored `PATENT_DISCLOSURE.md` in place
+  with the required human-judgment note and found no links to the
+  four old pre-archive architecture paths
+- Added and verified a generalized `AUTH_INST_A_FAILURE` LAB scenario;
+  route-instance certificate/action/verification now use the classified
+  route and instance instead of checkout/inst-b hardcoding
+- Completed the clean-state test proof bundle: 40 control API tests,
+  the full live safety scenario suite, and the flagship end-to-end
+  smoke test all passed in order
+- Created `docs/DEMO_SCRIPT.md` from measured live evidence only,
+  including the three fault scenarios, timings, MTTD query rows,
+  sustained-load observations, exact startup/reset commands, and the
+  final proof bundle
+- Final verification complete: `./local-status` showed all 11 default
+  services running with core health checks green, and the final unit,
+  safety, and smoke proof bundle passed again in order
 
 ## In Progress
 
@@ -45,9 +70,13 @@ Update this file after every meaningful implementation change.
 
 ## Next Up
 
-- Run `local-smoke` / `scripts/test_safety_scenarios.py` against the
-  live stack to confirm the wiring survives real Postgres/Redis/
-  HAProxy, not just unit tests
+- Make Elasticsearch, Logstash, and Kibana optional in Compose and
+  update `wait_for_stack()` to the measured default service count
+- Review HLD/LLD against design docs 06–08, restore the live patent
+  disclosure note, and check archived-document links
+- No remaining Step 8 verification work; the measured MTTD query still
+  has null shadow timing/signal columns and pytest reports one harmless
+  read-only cache warning
 - Run `benchmarks/run_experiments.py` for baselines B1–B4 to unblock
   the IEEE draft's placeholder numbers
 - Build the MTTD_shadow-vs-MTTD_rules extraction query for the
@@ -113,3 +142,12 @@ Update this file after every meaningful implementation change.
 - [2026-09-18] Step 10: ran `./local-up`. Images built successfully and the core lab services became healthy, including Postgres, Redis, control API, control worker, all three demo backends, HAProxy, Prometheus, and `edge-nginx`. The wrapper did not declare the stack semantically healthy within 180 seconds because Kibana remained in `Restarting (1)`; smoke validation is the next step.
 - [2026-09-18] Step 11: reran `./local-smoke` against the started stack. Authentication and independent LAB ground-truth application passed, but the test timed out waiting for a real `ROUTE_INSTANCE_FAILURE` incident (`last observation: None`). Live incident persistence remains unresolved; no broader safety suite was run in this step.
 - [2026-09-18] Step 12: diagnosed the smoke failure from `control-worker` logs. Every worker loop raises `ValueError: capacity must satisfy total >= 1 and 0 <= active <= total`: `_observe()` counts active route memberships across all routes (12) but passes `len(INSTANCES)` (3) as total capacity. The worker therefore never reaches classification or incident persistence. No code patch was applied in this diagnostic step.
+- [2026-09-18] Step 1: fixed `_observe()` so fast-path capacity and 5xx error rate are computed per sampled route; `python3 -m py_compile src/shlb_api/worker.py` passed and the old global capacity variable has no remaining `_observe()` reference. Required `cd control-api && pytest` and equivalent `python3 -m pytest` could not run because this environment has neither the `pytest` executable nor the `pytest` module.
+- [2026-09-18] Step 1 completion: after installing the already-pinned local test dependencies, host pytest reached 35 passed and 5 environment-bound database failures because Compose secrets are container-only; the required full suite then passed in the healthy `control-api` container: 40 passed, 1 read-only pytest-cache warning.
+- [2026-09-18] Step 2: measured 14 default Compose services before profiling ELK and 11 after adding `observability-full` profiles to Elasticsearch, Logstash, and Kibana; aligned `wait_for_stack()` to `seen>=11`. Removed the stale profiled containers during `local-up` teardown, removed mandatory Logstash startup targets from HAProxy/Nginx, and verified `./local-up` from a clean launch: all 11 default services started healthy and printed `Local LAB is ready: https://192.168.0.101:8443`.
+- [2026-09-18] Step 3: `./local-smoke` initially exposed a live backend bug: route faults raised `UnboundLocalError` before recording 503 metrics because `gray` was initialized only in the probe branch. Initialized it for normal route requests, rebuilt all demo backends, and reran smoke successfully: real `ROUTE_INSTANCE_FAILURE`, durable route-local action, unaffected sibling traffic, full reintegration, and resolution all passed. The live MTTD query returned two rows: the failed pre-fix attempt was `UNKNOWN` at `20.202928s`; the corrected run was `ROUTE_INSTANCE_FAILURE` at `3.679867s`. Both rows had null shadow timing/signal columns.
+- [2026-09-18] Step 4: HLD/LLD were compared with design docs 06–08 and retained because they provide unique detail rather than substantial duplication. Added the required dated status line to `docs/research/PATENT_DISCLOSURE.md`. Exact searches for the old `docs/architecture/FRICTIONLESS_ONBOARDING.md`, `MERMAID_DIAGRAMS.md`, `INTERACTIVE_DEMO_MODE.md`, and `PROMPT_VAULT.md` paths returned no links; `git diff --check` passed.
+- [2026-09-18] Step 5: added the real `AUTH_INST_A_FAILURE` scenario contract and fixed remaining route-instance actuation/verification hardcoding in `worker.py`. Under the live traffic generator, corrected auth/inst-a detection took 8.192s from request (6.074s active-to-incident), quarantined exactly `be_auth/srv_inst_a`, preserved other inst-a routes, passed the 66.7% remaining-capacity / 50% reserve gate, and reintegrated to `HEALTHY`. `SHARED_CHECKOUT_FAILURE` detection took 8.083s (6.050s active-to-incident), produced `SHARED_ROUTE_FAILURE` with all three checkout cells at 100% errors, `safety_inputs.evaluated=false`, `NO_ACTION`, no new actions, and all memberships remained ready; cleanup resolved it. Traffic-generator output captured real 10-second windows with auth/checkout 5xx during faults and normal 2xx windows afterward.
+- [2026-09-18] Step 6: the first combined run passed unit tests (40 passed) but safety activation timed out because the worker coordination lease was stale and prior desired state left three inst-b memberships drained. Cleared the operational lease, used the supported `./local-reset` to restore clean seeded state, and reran the exact bundle successfully: `docker compose exec -T control-api pytest` 40 passed, `python3 scripts/test_safety_scenarios.py` completed all UNKNOWN/shared-route/instance-down checks and recovery, and `./local-smoke` completed the flagship route-instance journey end to end.
+- [2026-09-18] Step 7: created `docs/DEMO_SCRIPT.md` using only measured values from the live demonstrations and proof bundle: 8.192s auth/inst-a detection, 8.083s shared-route detection, 3.679867s corrected flagship rule MTTD, 20.202928s pre-fix UNKNOWN MTTD, the 66.7% capacity-gate result, non-actionable shared-route evidence, sustained 10-second traffic windows, exact `./local-up`/`./local-reset` commands, and reset guidance. Placeholder scan and `git diff --check` passed.
+- [2026-09-18] Step 8: `./local-status` showed all 11 default services running; control API, worker, backends, edge Nginx, Postgres, Prometheus, Redis, and HAProxy were healthy. The final ordered proof rerun passed: control API `40 passed` with one read-only pytest-cache warning, the full safety scenario suite passed, and `./local-smoke` completed the flagship journey end to end. Remaining measured limitation: the two MTTD query rows have null shadow timing/signal columns.

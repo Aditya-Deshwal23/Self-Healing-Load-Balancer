@@ -248,8 +248,6 @@ services:
         condition: service_healthy
       demo-backend-c:
         condition: service_healthy
-      logstash:
-        condition: service_healthy
     expose:
       - "8080"
       - "8404"
@@ -312,6 +310,7 @@ services:
         max-file: "2"
 
   elasticsearch:
+    profiles: ["observability-full"]
     image: docker.elastic.co/elasticsearch/elasticsearch:8.15.3
     restart: unless-stopped
     environment:
@@ -346,6 +345,7 @@ services:
         max-file: "3"
 
   logstash:
+    profiles: ["observability-full"]
     image: docker.elastic.co/logstash/logstash:8.15.3
     restart: unless-stopped
     depends_on:
@@ -382,6 +382,7 @@ services:
         max-file: "3"
 
   kibana:
+    profiles: ["observability-full"]
     image: docker.elastic.co/kibana/kibana:8.15.3
     restart: unless-stopped
     depends_on:

@@ -204,6 +204,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         failed = self._fault_affects(route, fault)
+        gray = bool(fault and fault["kind"] == "gray_failure")
         status = HTTPStatus.INTERNAL_SERVER_ERROR if failed and gray else HTTPStatus.SERVICE_UNAVAILABLE if failed else HTTPStatus.OK
         payload = {
             "instance": INSTANCE_ID,

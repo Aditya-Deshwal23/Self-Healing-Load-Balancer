@@ -1,3 +1,5 @@
+Reviewed 2026-09-18: kept live, not archived — patent-disclosure content requires human legal/business judgment, not automated scope-pruning.
+
 # SHLB Patent-Style Disclosure Outline
 
 ## Working title

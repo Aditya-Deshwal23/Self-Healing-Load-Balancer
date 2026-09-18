@@ -68,7 +68,7 @@ generate_certificate() {
 wait_for_stack() {
     deadline=$((SECONDS + 180))
     while [ "$SECONDS" -lt "$deadline" ]; do
-        if docker compose ps --format json 2>/dev/null | awk 'BEGIN{ok=1;seen=0} /"Service"/{seen++} /"Health":"(starting|unhealthy)"/{ok=0} /"State":"(created|exited|restarting)"/{ok=0} END{exit !(seen>=10 && ok)}'; then
+        if docker compose ps --format json 2>/dev/null | awk 'BEGIN{ok=1;seen=0} /"Service"/{seen++} /"Health":"(starting|unhealthy)"/{ok=0} /"State":"(created|exited|restarting)"/{ok=0} END{exit !(seen>=11 && ok)}'; then
             return
         fi
         sleep 2
