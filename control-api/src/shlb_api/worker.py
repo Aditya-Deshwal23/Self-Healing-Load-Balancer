@@ -47,6 +47,14 @@ WORKER_LOCK_ID = 0x53484C42
 TERMINAL_ACTIONS = {"COMMITTED", "ROLLED_BACK", "ROLLBACK_FAILED", "FAILED", "NEEDS_REVIEW", "RESULT_UNKNOWN"}
 TERMINAL_FAULTS = {"CLEARED", "EXPIRED", "FAILED"}
 ACTIVE_INCIDENTS = {"OPEN", "MITIGATING", "VERIFYING", "RECOVERING", "NEEDS_REVIEW"}
+WORKER_LEASE_KEY = "worker:authority:lease"
+RECLAIM_LEASE_SCRIPT = """
+if redis.call("get", KEYS[1]) == ARGV[1] then
+    redis.call("set", KEYS[1], ARGV[2], "EX", ARGV[3])
+    return 1
+end
+return 0
+"""
 
 
 class ControlWorker:
@@ -107,15 +115,54 @@ class ControlWorker:
             self.generation_id = generation.id
 
     def _acquire_lease(self) -> None:
-        if not self.redis.set("worker:authority:lease", self.worker_id, nx=True, ex=LAB_POLICY.worker_lease_seconds):
-            existing = self.redis.get("worker:authority:lease")
-            if existing != self.worker_id:
-                raise RuntimeError("another worker holds the Redis coordination lease")
+        while True:
+            if self.redis.set(WORKER_LEASE_KEY, self.worker_id, nx=True, ex=LAB_POLICY.worker_lease_seconds):
+                return
+            existing = self.redis.get(WORKER_LEASE_KEY)
+            if existing == self.worker_id:
+                self.redis.expire(WORKER_LEASE_KEY, LAB_POLICY.worker_lease_seconds)
+                return
+            if existing and self._lease_owner_is_stale(existing):
+                reclaimed = self.redis.eval(
+                    RECLAIM_LEASE_SCRIPT,
+                    1,
+                    WORKER_LEASE_KEY,
+                    existing,
+                    self.worker_id,
+                    str(LAB_POLICY.worker_lease_seconds),
+                )
+                if reclaimed:
+                    print(
+                        json.dumps(
+                            {"event": "worker_coordination_lease_reclaimed", "previous_owner": existing},
+                            separators=(",", ":"),
+                        ),
+                        flush=True,
+                    )
+                    return
+            time.sleep(max(0.5, LAB_POLICY.loop_seconds))
+
+    def _lease_owner_is_stale(self, worker_id: str) -> bool:
+        with self.sessions() as db:
+            generation = db.scalar(
+                select(ControllerGeneration)
+                .where(
+                    ControllerGeneration.environment_id == IDS["environment"],
+                    ControllerGeneration.worker_id == worker_id,
+                )
+                .order_by(ControllerGeneration.generation.desc())
+                .limit(1)
+            )
+            if generation is None:
+                return False
+            return generation.status != "ACTIVE" or generation.last_heartbeat_at < utc_now() - timedelta(
+                seconds=LAB_POLICY.heartbeat_stale_seconds
+            )
 
     def _refresh_lease(self) -> bool:
-        if self.redis.get("worker:authority:lease") != self.worker_id:
+        if self.redis.get(WORKER_LEASE_KEY) != self.worker_id:
             return False
-        self.redis.expire("worker:authority:lease", LAB_POLICY.worker_lease_seconds)
+        self.redis.expire(WORKER_LEASE_KEY, LAB_POLICY.worker_lease_seconds)
         return True
 
     def tick(self) -> None:
@@ -266,10 +313,19 @@ class ControlWorker:
                     and item["weight"] > 0
                     and item["admin_state"] == "ready"
                 )
-                error_rate = sample["errors_5xx"] / sample["sessions"] if sample.get("sessions") else 0.0
+                observed_evidence = evidence.get(key, {})
+                latency_ms = max(
+                    sample["latency_ms"] or 0.0,
+                    observed_evidence.get("p95_ms") or 0.0,
+                )
+                error_count = sample.get("errors_5xx_delta")
+                request_count = sample.get("sessions_total_delta")
+                error_rate = observed_evidence.get("error_rate")
+                if error_rate is None:
+                    error_rate = error_count / request_count if request_count else 0.0
                 recommendation = self.fastpath.observe(
                     key,
-                    latency_ms=sample["latency_ms"],
+                    latency_ms=latency_ms,
                     error_rate=error_rate,
                     active_capacity=route_active_capacity,
                     total_capacity=len(INSTANCES),
@@ -802,13 +858,20 @@ class ControlWorker:
 
     def _advance_reintegration(self, db: Session, run: ReintegrationRun, evidence: dict, probes: dict) -> None:
         action = db.get(Action, run.action_id)
+        membership = db.get(RouteMembership, action.membership_id)
+        if membership is None:
+            raise RuntimeError("reintegration membership is missing its seed baseline")
         stage = db.scalar(select(ReintegrationStage).where(ReintegrationStage.run_id == run.id, ReintegrationStage.status == "CURRENT").limit(1))
         if stage is None:
             self._recover_reintegration_transition(db, run, action)
             return
         now = utc_now()
-        target_probe = probes["checkout/inst-b"]
-        target_evidence = evidence["checkout/inst-b"]
+        target_key = (
+            f"{action.haproxy_backend.removeprefix('be_')}/"
+            f"{action.haproxy_server.removeprefix('srv_').replace('_', '-')}"
+        )
+        target_probe = probes[target_key]
+        target_evidence = evidence[target_key]
         if stage.requested_weight is not None:
             observed = self.runtime.read(action.haproxy_backend, action.haproxy_server)
             expected_admin = "ready" if stage.requested_weight > 0 else "drain"
@@ -854,7 +917,7 @@ class ControlWorker:
                 incident.resolved_at = now
                 incident.last_observed_at = now
                 incident.version += 1
-                self._event(db, event_type="incident_resolved", aggregate_type="incident", aggregate_id=incident.id, aggregate_version=incident.version, incident_id=incident.id, action_id=action.id, data={"resolution": "verified staged reintegration", "final_weight": 100})
+                self._event(db, event_type="incident_resolved", aggregate_type="incident", aggregate_id=incident.id, aggregate_version=incident.version, incident_id=incident.id, action_id=action.id, data={"resolution": "verified staged reintegration", "final_weight": membership.baseline_weight})
         else:
             stage.sample_count = target_evidence["samples"]
             stage.result = {"error_rate": target_evidence["error_rate"], "real_samples": target_evidence["samples"], "direct_probe": target_probe}
@@ -890,7 +953,8 @@ class ControlWorker:
                 run.last_verified_stage = stage.name
                 next_stage = db.scalar(select(ReintegrationStage).where(ReintegrationStage.run_id == run.id, ReintegrationStage.sequence == stage.sequence + 1))
                 if next_stage.name == "HEALTHY":
-                    next_stage.observed_weight = 100
+                    observed = self._set_reintegration_state(db, run, action, membership.baseline_weight)
+                    next_stage.observed_weight = observed["weight"]
                 else:
                     observed = self._set_reintegration_state(db, run, action, int(next_stage.requested_weight))
                     next_stage.observed_weight = observed["weight"]

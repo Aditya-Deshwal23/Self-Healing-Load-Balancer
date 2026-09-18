@@ -23,6 +23,7 @@ class HAProxyRuntime:
         self.path = path
         self.timeout = min(timeout, 0.15)
         self._previous_5xx: dict[str, int] = {}
+        self._previous_sessions_total: dict[str, int] = {}
 
     def command(self, value: str) -> str:
         if "\n" in value or len(value) > 512:
@@ -142,10 +143,12 @@ class HAProxyRuntime:
                 continue
             key = f"{backend.removeprefix('be_')}/{server.removeprefix('srv_').replace('_', '-')}"
             errors = self._number(row.get("hrsp_5xx"), int)
+            sessions_total = self._number(row.get("stot"), int)
             sample = {
                 "latency_ms": self._number(row.get("rtime"), float),
                 "errors_5xx": errors,
                 "sessions": self._number(row.get("scur"), int),
+                "sessions_total": sessions_total,
                 "queue": self._number(row.get("qcur"), int),
                 "weight": self._number(row.get("weight"), int),
             }
@@ -157,6 +160,14 @@ class HAProxyRuntime:
                 else:
                     sample["counter_reset"] = True
             self._previous_5xx[key] = errors if errors is not None else previous
+            previous_sessions_total = self._previous_sessions_total.get(key)
+            if sessions_total is not None and previous_sessions_total is not None:
+                session_delta = sessions_total - previous_sessions_total
+                if session_delta >= 0:
+                    sample["sessions_total_delta"] = session_delta
+                else:
+                    sample["counter_reset"] = True
+            self._previous_sessions_total[key] = sessions_total if sessions_total is not None else previous_sessions_total
             result[key] = sample
         return result
 

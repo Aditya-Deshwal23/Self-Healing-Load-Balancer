@@ -2,7 +2,7 @@
 
 ## Slide 1 — Title
 
-Introduce the project as a Phase 2 local prototype. Say that the presentation focuses on one working recovery path rather than claiming a complete production platform.
+Introduce the project as a Phase 1 local prototype with an advisory HYBRID_SHADOW signal. Say that the presentation focuses on one working recovery path rather than claiming a complete production platform.
 
 ## Slide 2 — Problem Statement
 
@@ -34,7 +34,7 @@ This is the key slide. For the main scenario, checkout on B fails but other rout
 
 ## Slide 9 — Live Demo Flow
 
-Tell the audience what they will see before starting: a normal matrix, a fault injection, an incident and action, traffic continuing through healthy checkout backends, and a gradual recovery after the fault is cleared. Pause briefly at each UI state.
+Tell the audience what they will see before starting: a normal matrix, a fault injection, an incident and action, traffic continuing through healthy checkout backends, and a gradual recovery after the fault is cleared. The measured proof set also includes auth/inst-a isolation and a gray-failure shadow signal without destructive action. Pause briefly at each UI state.
 
 ## Slide 10 — Current Achievements
 

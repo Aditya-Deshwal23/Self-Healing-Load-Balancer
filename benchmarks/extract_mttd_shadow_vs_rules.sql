@@ -20,13 +20,19 @@ WITH matched_faults AS (
         i.opened_at,
         i.resolved_at
     FROM lab_faults AS lf
-    JOIN incidents AS i
+    LEFT JOIN incidents AS i
       ON i.environment_id = lf.environment_id
      AND lf.applied_at IS NOT NULL
      AND i.opened_at >= lf.applied_at
      AND i.opened_at <= COALESCE(lf.cleared_at, lf.expires_at) + INTERVAL '5 minutes'
+    AND (lf.target_route IS NULL OR i.route_id IN (SELECT id FROM route_groups WHERE route_key = lf.target_route))
+    AND (lf.target_instance IS NULL OR i.instance_id IN (SELECT id FROM backend_instances WHERE stable_name = lf.target_instance))
+    LEFT JOIN route_groups AS rg
+      ON rg.id = i.route_id
+    LEFT JOIN backend_instances AS bi
+      ON bi.id = i.instance_id
     WHERE lf.environment_id = :environment_id
-      AND (:after_applied_at IS NULL OR lf.applied_at >= :after_applied_at)
+      AND (CAST(:after_applied_at AS timestamptz) IS NULL OR lf.applied_at >= CAST(:after_applied_at AS timestamptz))
     ORDER BY lf.id, i.opened_at
 ),
 shadow_observations AS (

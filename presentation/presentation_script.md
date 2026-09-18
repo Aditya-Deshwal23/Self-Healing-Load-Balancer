@@ -2,7 +2,7 @@
 
 ## Slide 1 — Title
 
-Good morning. Our project is called **Self-Healing Load Balancer**. This is a Phase 2 local prototype. We will show the part that currently works: detecting a supported backend failure, changing the affected HAProxy route membership, verifying the result, and restoring traffic after the failure is cleared.
+Good morning. Our project is called **Self-Healing Load Balancer**. This is a Phase 1 local prototype with an advisory HYBRID_SHADOW signal. We will show the part that currently works: detecting a supported backend failure, changing the affected HAProxy route membership, verifying the result, and restoring traffic after the failure is cleared.
 
 ## Slide 2 — Problem Statement
 
@@ -64,7 +64,7 @@ One clarification is important. The controller does not restart backend containe
 
 ## Slide 9 — Live Demo Flow
 
-For the demonstration, we run `./local-up`. This creates local secrets and a development certificate, starts the Compose stack, waits for health, and prints an HTTPS address. We sign in to the console using the generated local password.
+For the demonstration, we run `./local-up`. This creates local secrets and a development certificate, starts the Compose stack, waits for health, and prints an HTTPS address. We sign in to the console using the generated local password. The measured live proof also covers `AUTH_INST_A_FAILURE` and the advisory `GRAY_FAILURE_INST_A` path.
 
 The first screen shows a normal route-by-instance matrix. Next, in the Lab screen, we select **Checkout fails on Backend B**. After the evidence window, an incident appears with its classification and decision trace.
 

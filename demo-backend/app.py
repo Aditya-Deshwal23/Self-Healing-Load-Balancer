@@ -179,9 +179,7 @@ class Handler(BaseHTTPRequestHandler):
             failed = self._fault_affects(route, fault)
             gray = bool(fault and fault["kind"] == "gray_failure")
             if gray:
-                time.sleep(2.0)
-                if random.random() < 0.2:
-                    failed = True
+                time.sleep(0.12)
             self._json(
                 HTTPStatus.SERVICE_UNAVAILABLE if failed else HTTPStatus.OK,
                 {"instance": INSTANCE_ID, "route": route, "reachable": True, "application_ok": not failed},
@@ -205,6 +203,9 @@ class Handler(BaseHTTPRequestHandler):
 
         failed = self._fault_affects(route, fault)
         gray = bool(fault and fault["kind"] == "gray_failure")
+        if gray:
+            time.sleep(0.5)
+            failed = random.random() < 0.4
         status = HTTPStatus.INTERNAL_SERVER_ERROR if failed and gray else HTTPStatus.SERVICE_UNAVAILABLE if failed else HTTPStatus.OK
         payload = {
             "instance": INSTANCE_ID,

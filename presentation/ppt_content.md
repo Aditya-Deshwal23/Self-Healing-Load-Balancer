@@ -3,7 +3,7 @@
 ## 1. Title
 
 - Self-Healing Load Balancer
-- Phase 2 local prototype
+- Phase 1 local prototype with advisory HYBRID_SHADOW telemetry
 - University software engineering review
 - Team presentation
 
@@ -76,6 +76,7 @@
 - Observe incident and route isolation
 - Clear the fault
 - Watch staged reintegration to healthy state
+- Optional measured paths: Auth x inst-a and gray failure on inst-a
 
 ## 10. Current Achievements
 

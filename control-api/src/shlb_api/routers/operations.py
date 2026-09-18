@@ -281,6 +281,7 @@ def create_fault(environment_id: uuid.UUID, payload: LabFaultCreate, request: Re
     target_map = {
         "CHECKOUT_INST_B_FAILURE": ("checkout", "inst-b"),
         "AUTH_INST_A_FAILURE": ("auth", "inst-a"),
+        "GRAY_FAILURE_INST_A": (None, "inst-a"),
         "INST_B_DOWN": (None, "inst-b"),
         "SHARED_CHECKOUT_FAILURE": ("checkout", "all"),
         "UNKNOWN_CONFLICT": ("checkout", "inst-b"),
