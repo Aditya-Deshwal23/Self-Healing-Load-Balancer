@@ -382,7 +382,7 @@ class ControlWorker:
         summary_map = {
             "ROUTE_INSTANCE_FAILURE": f"{decision.route} fails only on {decision.instance} while peers and sibling routes remain healthy.",
             "SHARED_ROUTE_FAILURE": "Checkout fails across all physical instances; mass ejection is prohibited.",
-            "INSTANCE_DOWN": "All registered routes on inst-b fail direct application probes.",
+            "INSTANCE_DOWN": f"All registered routes on {decision.instance} fail direct application probes.",
             "UNKNOWN": "Evidence is conflicting or incomplete; destructive action is prohibited.",
         }
         incident = Incident(environment_id=IDS["environment"], route_id=route_id, instance_id=instance_id, status="NEEDS_REVIEW" if decision.final_class == "UNKNOWN" else "OPEN", severity="CRITICAL" if decision.final_class in {"INSTANCE_DOWN", "SHARED_ROUTE_FAILURE"} else "WARNING", operational_class=decision.final_class, fingerprint_hash=fingerprint_hash, summary=summary_map[decision.final_class], opened_at=now, last_observed_at=now)
@@ -405,19 +405,23 @@ class ControlWorker:
                 {"unit": "SHARED_ROUTE", "targets": [f"all {decision.route} memberships"], "result": "rejected", "reason": f"{decision.route} peers remain healthy"},
             ]
         elif decision.final_class == "INSTANCE_DOWN":
+            target_instance = decision.instance
+            if target_instance is None:
+                raise RuntimeError("instance-down decision has no target instance")
+            target_server = f"srv_inst_{target_instance[-1]}"
             current = self.runtime.memberships()
             route_peer_queues = {
                 route: {
                     item["server"].removeprefix("srv_").replace("_", "-"): item["queue"]
                     for item in current
-                    if item["backend"] == f"be_{route}" and item["server"] != "srv_inst_b"
+                    if item["backend"] == f"be_{route}" and item["server"] != target_server
                 }
                 for route in ROUTES
             }
-            safety = instance_capacity(capacities={key: 100 for key in INSTANCES}, target_instance="inst-b", route_peer_queues=route_peer_queues, minimum_reserve_percent=LAB_POLICY.minimum_physical_reserve_percent)
+            safety = instance_capacity(capacities={key: 100 for key in INSTANCES}, target_instance=target_instance, route_peer_queues=route_peer_queues, minimum_reserve_percent=LAB_POLICY.minimum_physical_reserve_percent)
             candidates = [
-                {"unit": "INSTANCE", "targets": [f"be_{route}/srv_inst_b" for route in ROUTES], "result": "selected" if safety["allowed"] else "rejected", "reason": "all routes and direct probes support instance scope" if safety["allowed"] else "physical reserve or peer queue guard failed"},
-                {"unit": "ROUTE_INSTANCE", "result": "rejected", "reason": "failure spans all registered routes on inst-b"},
+                {"unit": "INSTANCE", "targets": [f"be_{route}/{target_server}" for route in ROUTES], "result": "selected" if safety["allowed"] else "rejected", "reason": "all routes and direct probes support instance scope" if safety["allowed"] else "physical reserve or peer queue guard failed"},
+                {"unit": "ROUTE_INSTANCE", "result": "rejected", "reason": f"failure spans all registered routes on {target_instance}"},
                 {"unit": "SHARED_ROUTE", "result": "rejected", "reason": "healthy physical peers remain for every route"},
             ]
         certificate_payload = {"scope": decision.support, "safety": safety, "candidates": candidates, "window_id": str(window.id), "fingerprint": fingerprint_hash}
@@ -517,9 +521,13 @@ class ControlWorker:
             return
         if db.scalar(select(Action).where(Action.incident_id == incident.id).limit(1)):
             return
-        registered = db.scalars(select(RouteMembership).where(RouteMembership.instance_id == INSTANCE_IDS["inst-b"])).all()
+        instance = next((name for name, instance_id in INSTANCE_IDS.items() if instance_id == incident.instance_id), None)
+        if instance is None:
+            raise RuntimeError("instance-down incident has an unknown registered instance")
+        target_server = f"srv_inst_{instance[-1]}"
+        registered = db.scalars(select(RouteMembership).where(RouteMembership.instance_id == INSTANCE_IDS[instance])).all()
         if len(registered) != len(ROUTES):
-            raise RuntimeError("registered inst-b membership set is incomplete")
+            raise RuntimeError(f"registered {instance} membership set is incomplete")
         targets = sorted((membership.haproxy_backend, membership.haproxy_server, membership.id) for membership in registered)
         before_by_target = {(item["backend"], item["server"]): item for item in memberships}
         if any((backend, server) not in before_by_target for backend, server, _ in targets):
@@ -529,17 +537,17 @@ class ControlWorker:
             for row in db.scalars(select(DesiredRouteState).where(DesiredRouteState.membership_id.in_([membership_id for _, _, membership_id in targets]))).all()
         }
         if len(desired_rows) != len(targets):
-            raise RuntimeError("durable desired state is incomplete for inst-b")
+            raise RuntimeError(f"durable desired state is incomplete for {instance}")
         previous_desired = {
             f"{backend}/{server}": {"admin_state": desired_rows[membership_id].admin_state, "weight": desired_rows[membership_id].weight}
             for backend, server, membership_id in targets
         }
         previous_observed = {f"{backend}/{server}": before_by_target[(backend, server)] for backend, server, _ in targets}
         requested_targets = {f"{backend}/{server}": {"admin_state": "drain", "weight": 0} for backend, server, _ in targets}
-        peers = sorted(f"{item['backend']}/{item['server']}" for item in memberships if item["server"] != "srv_inst_b")
+        peers = sorted(f"{item['backend']}/{item['server']}" for item in memberships if item["server"] != target_server)
         now = utc_now()
         representative = targets[0]
-        action = Action(environment_id=incident.environment_id, incident_id=incident.id, evidence_certificate_id=certificate.id, membership_id=representative[2], action_kind="INSTANCE_QUARANTINE", lifecycle="PREPARED", controller_generation=self.generation, haproxy_backend="all_routes", haproxy_server="srv_inst_b", previous_desired={"targets": previous_desired}, previous_observed={"targets": previous_observed}, requested_state={"admin_state": "drain", "weight": 0, "targets": requested_targets}, expected_effect="Remove inst-b from every predeclared route while preserving physical peers inst-a and inst-c.", preservation_set=peers, verification_criteria={"all_routes_success_rate_min": 1 - LAB_POLICY.healthy_rate, "minimum_real_samples_per_route": LAB_POLICY.instance_route_minimum_samples, "peer_queue_max": LAB_POLICY.peer_queue_limit}, rollback_strategy={"targets": previous_desired, "trigger": ["INEFFECTIVE", "HARMFUL", "READBACK_MISMATCH"]}, idempotency_key=f"controller-g{self.generation}:{incident.id}:instance-inst-b", expires_at=now + timedelta(seconds=LAB_POLICY.action_expiry_seconds))
+        action = Action(environment_id=incident.environment_id, incident_id=incident.id, evidence_certificate_id=certificate.id, membership_id=representative[2], action_kind="INSTANCE_QUARANTINE", lifecycle="PREPARED", controller_generation=self.generation, haproxy_backend="all_routes", haproxy_server=target_server, previous_desired={"targets": previous_desired}, previous_observed={"targets": previous_observed}, requested_state={"admin_state": "drain", "weight": 0, "targets": requested_targets}, expected_effect=f"Remove {instance} from every predeclared route while preserving physical peers {', '.join(other for other in INSTANCES if other != instance)}.", preservation_set=peers, verification_criteria={"all_routes_success_rate_min": 1 - LAB_POLICY.healthy_rate, "minimum_real_samples_per_route": LAB_POLICY.instance_route_minimum_samples, "peer_queue_max": LAB_POLICY.peer_queue_limit}, rollback_strategy={"targets": previous_desired, "trigger": ["INEFFECTIVE", "HARMFUL", "READBACK_MISMATCH"]}, idempotency_key=f"controller-g{self.generation}:{incident.id}:instance-{instance}", expires_at=now + timedelta(seconds=LAB_POLICY.action_expiry_seconds))
         db.add(action)
         db.flush()
         for _, _, membership_id in targets:
@@ -566,8 +574,8 @@ class ControlWorker:
         after = self.runtime.memberships()
         after_by_target = {(item["backend"], item["server"]): item for item in after}
         targets_confirmed = all(after_by_target.get((backend, server), {}).get("admin_state") == "drain" and after_by_target.get((backend, server), {}).get("weight") == 0 for backend, server, _ in targets)
-        peers_before = {(item["backend"], item["server"]): (item["admin_state"], item["weight"]) for item in memberships if item["server"] != "srv_inst_b"}
-        peers_after = {(item["backend"], item["server"]): (item["admin_state"], item["weight"]) for item in after if item["server"] != "srv_inst_b"}
+        peers_before = {(item["backend"], item["server"]): (item["admin_state"], item["weight"]) for item in memberships if item["server"] != action.haproxy_server}
+        peers_after = {(item["backend"], item["server"]): (item["admin_state"], item["weight"]) for item in after if item["server"] != action.haproxy_server}
         peers_preserved = peers_before == peers_after
         attempt.completed_at = utc_now()
         attempt.response = {"targets": responses, "error_type": type(runtime_error).__name__ if runtime_error else None}
@@ -643,7 +651,7 @@ class ControlWorker:
                 attempt.status = "ACKNOWLEDGEMENT_LOST_CONFIRMED"
                 attempt.completed_at = utc_now()
                 attempt.response = {"restart_reconciliation": True, "blind_retry": False}
-                attempt.observed_state = {"target": observed, "inst_b_other_memberships_preserved": True, "siblings": siblings}
+                attempt.observed_state = {"target": observed, "target_instance_other_memberships_preserved": True, "siblings": siblings}
             event_type = "action_applied"
             data = {"lifecycle": "VERIFYING", "restart_reconciliation": True, "blind_retry": False, "observed": observed, "preservation_confirmed": True}
         else:
@@ -716,13 +724,14 @@ class ControlWorker:
     def _verify_instance_action(self, db: Session, action: Action, evidence: dict, memberships: list[dict]) -> None:
         route_results: dict[str, dict] = {}
         for route in ROUTES:
-            peers = [evidence[f"{route}/{instance}"] for instance in ("inst-a", "inst-c")]
+            target_instance = action.haproxy_server.removeprefix("srv_").replace("_", "-")
+            peers = [evidence[f"{route}/{instance}"] for instance in INSTANCES if instance != target_instance]
             samples = sum(item["samples"] for item in peers)
             errors = sum(item["errors"] for item in peers)
             rate = errors / samples if samples else None
             route_results[route] = {"samples": samples, "errors": errors, "error_rate": round(rate, 4) if rate is not None else None, "passed": samples >= LAB_POLICY.instance_route_minimum_samples and rate is not None and rate <= LAB_POLICY.healthy_rate}
-        target_rows = [item for item in memberships if item["server"] == "srv_inst_b"]
-        peer_rows = [item for item in memberships if item["server"] != "srv_inst_b"]
+        target_rows = [item for item in memberships if item["server"] == action.haproxy_server]
+        peer_rows = [item for item in memberships if item["server"] != action.haproxy_server]
         aligned = len(target_rows) == len(ROUTES) and all(item["admin_state"] == "drain" and item["weight"] == 0 for item in target_rows)
         queue_ok = all(item["queue"] <= LAB_POLICY.peer_queue_limit for item in peer_rows)
         affected_ok = all(result["passed"] for result in route_results.values())
@@ -737,7 +746,7 @@ class ControlWorker:
         else:
             result = "INSUFFICIENT_EVIDENCE"
         revision = (db.scalar(select(func.max(VerificationResult.revision)).where(VerificationResult.action_id == action.id)) or 0) + 1
-        verification = VerificationResult(action_id=action.id, revision=revision, result=result, affected_obligation={"passed": affected_ok, "routes_after_instance_drain": route_results}, preservation_obligation={"passed": queue_ok and aligned, "physical_peers": [f"{item['backend']}/{item['server']}" for item in peer_rows], "peer_queue_max": max((item["queue"] for item in peer_rows), default=0), "all_inst_b_memberships_aligned": aligned, "capacity_counted_once": True}, sample_count=sum(item["samples"] for item in route_results.values()), started_at=action.created_at, completed_at=utc_now() if result != "INSUFFICIENT_EVIDENCE" else None)
+        verification = VerificationResult(action_id=action.id, revision=revision, result=result, affected_obligation={"passed": affected_ok, "routes_after_instance_drain": route_results}, preservation_obligation={"passed": queue_ok and aligned, "physical_peers": [f"{item['backend']}/{item['server']}" for item in peer_rows], "peer_queue_max": max((item["queue"] for item in peer_rows), default=0), "all_target_instance_memberships_aligned": aligned, "capacity_counted_once": True}, sample_count=sum(item["samples"] for item in route_results.values()), started_at=action.created_at, completed_at=utc_now() if result != "INSUFFICIENT_EVIDENCE" else None)
         db.add(verification)
         db.flush()
         incident = db.get(Incident, action.incident_id)
@@ -775,13 +784,14 @@ class ControlWorker:
         return matches, {target: current.get(target, {}) for target in targets}
 
     def _restore_instance_action(self, db: Session, action: Action, probes: dict) -> None:
-        probe_ok = all(probes[f"{route}/inst-b"].get("application_ok") is True for route in ROUTES)
+        target_instance = action.haproxy_server.removeprefix("srv_").replace("_", "-")
+        probe_ok = all(probes[f"{route}/{target_instance}"].get("application_ok") is True for route in ROUTES)
         latest = db.scalar(select(VerificationResult).where(VerificationResult.action_id == action.id).order_by(VerificationResult.revision.desc()).limit(1))
         previous_passes = int((latest.affected_obligation or {}).get("recovery_probe_passes", 0)) if latest else 0
         passes = previous_passes + 1 if probe_ok else 0
         if passes < LAB_POLICY.instance_recovery_probe_passes:
             revision = (latest.revision if latest else 0) + 1
-            verification = VerificationResult(action_id=action.id, revision=revision, result="INSUFFICIENT_EVIDENCE", affected_obligation={"recovery_probe_passes": passes, "required": LAB_POLICY.instance_recovery_probe_passes, "all_inst_b_routes_healthy": probe_ok}, preservation_obligation={"quarantine_retained": True}, sample_count=passes, started_at=utc_now(), completed_at=None)
+            verification = VerificationResult(action_id=action.id, revision=revision, result="INSUFFICIENT_EVIDENCE", affected_obligation={"recovery_probe_passes": passes, "required": LAB_POLICY.instance_recovery_probe_passes, "all_target_instance_routes_healthy": probe_ok}, preservation_obligation={"quarantine_retained": True}, sample_count=passes, started_at=utc_now(), completed_at=None)
             db.add(verification)
             db.flush()
             self._event(db, event_type="verification_updated", aggregate_type="verification", aggregate_id=verification.id, aggregate_version=revision, incident_id=action.incident_id, action_id=action.id, data={"result": "INSUFFICIENT_EVIDENCE", "recovery_probe_passes": passes, "required": LAB_POLICY.instance_recovery_probe_passes})
@@ -789,7 +799,7 @@ class ControlWorker:
             return
         targets = action.rollback_strategy.get("targets", {})
         desired_rows = {str(row.membership_id): row for row in db.scalars(select(DesiredRouteState).where(DesiredRouteState.source_action_id == action.id)).all()}
-        registered = db.scalars(select(RouteMembership).where(RouteMembership.instance_id == INSTANCE_IDS["inst-b"])).all()
+        registered = db.scalars(select(RouteMembership).where(RouteMembership.instance_id == INSTANCE_IDS[target_instance])).all()
         membership_by_target = {f"{row.haproxy_backend}/{row.haproxy_server}": row for row in registered}
         for target, state in targets.items():
             membership = membership_by_target.get(target)
