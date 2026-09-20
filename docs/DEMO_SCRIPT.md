@@ -1,3 +1,163 @@
+# EBMSH Golden Demo Runbook
+
+This runbook records the measured Part 2 Golden Demo path. The physical
+instances are the repository's `inst-a`, `inst-b`, and `inst-c` identities;
+the demo labels them node-a, node-b, and node-c. No result below is estimated.
+
+## Start Clean
+Start a disposable stack with topology seed rows disabled so the registry API
+is the only topology writer:
+
+```sh
+SHLB_SEED_TOPOLOGY=false ./local-reset
+
+The measured stack became ready at:
+```text
+https://192.168.0.101:8443
+```
+
+The seeded `admin@shlb.local` account has the `PROJECT_ADMIN` role. The
+password is stored in `.secrets/bootstrap_password`.
+
+## Step A: Provision Topology
+Through the authenticated registry API, create these route groups:
+
+| Route | Priority | Criticality |
+|---|---:|---|
+| `auth` | 10 | `HIGH` |
+| `catalog` | 20 | `STANDARD` |
+| `inventory` | 30 | `STANDARD` |
+| `checkout` | 40 | `CRITICAL` |
+
+Create `inst-a`, `inst-b`, and `inst-c` as active backends with port `8080`,
+capacity `100`, and probe profile `phase1-http-healthz`. Pair every backend
+with each route using its `be_` backend name, its `srv_inst_` server name, and baseline weight
+`100`.
+Measured API checkpoint:
+
+- 12 matrix cells were present.
+- Routes were `auth`, `catalog`, `checkout`, and `inventory`.
+- Instances were `inst-a`, `inst-b`, and `inst-c`.
+- Every desired cell was `ready/100`.
+
+## Step B: Generate and Start HAProxy
+Render `RouteGroup`, `BackendInstance`, and `RouteMembership` rows with
+`control-api/src/shlb_api/haproxy_config.py`. The generated configuration
+contained two inventory ACL lines, one `be_inventory` block, and twelve
+inventory backend server lines across the four route blocks. HAProxy syntax
+validation passed, and the temporary generated-config stack returned HTTP 200
+from the edge health endpoint.
+The checked-in `haproxy/haproxy.cfg` remains unchanged. Deployment-time config
+generation is separate from Runtime API actuation.
+
+## Step C: Prove Baseline Traffic
+Run traffic across the Golden routes:
+
+```sh
+docker compose run --rm --no-deps \
+  -e TRAFFIC_ROUTES=auth,catalog,inventory,checkout \
+  -e TRAFFIC_PROFILE_JSON='[{"routes":"all","requests_per_second":40,"duration_seconds":20}]' \
+  traffic-generator
+```
+
+Measured 10-second window:
+
+```json
+{"event":"traffic_window","seconds":10,"outcomes":{"auth:2xx":100,"catalog:2xx":100,"inventory:2xx":100,"checkout:2xx":100}}
+```
+
+## Step D: Inject and Observe a Real Fault
+
+Keep the four-route traffic stream active and inject `AUTH_INST_A_FAILURE`
+through the authenticated LAB API. The measured request-to-active time was
+`2.043` seconds.
+
+The inventory-inclusive run then produced:
+
+- Incident classification: `UNKNOWN`.
+- Request-to-incident time: `22.216` seconds.
+- Decision Trace final class: `UNKNOWN`.
+- Evidence certificate: present.
+- Action: absent; no HAProxy mutation occurred.
+- `auth/inst-a`: desired `ready/100`, observed `ready/100`.
+
+This is a measured Golden Demo limitation, not a successful route-instance
+healing result. The current evidence collector still enumerates only the
+original four-route fixture contract in `worker_io.py`, so inventory is not
+included in the mandatory comparison set. The fault was cleared through the
+API and no active fault remained.
+
+## Step E: Shadow Signal Evidence
+
+Run the fixed `GRAY_FAILURE_INST_A` for at least 60 seconds under background
+traffic, then execute:
+
+```sh
+sed "s/:environment_id/'40000000-0000-4000-8000-000000000001'/g; s/:after_applied_at/NULL/g" \
+  benchmarks/extract_mttd_shadow_vs_rules.sql \
+  | docker compose exec -T postgres psql -U shlb_api -d shlb
+```
+
+Measured result from the fixed gray run:
+
+- `shadow_mttd_seconds`: `5.427392`.
+- `mttd_rules_seconds`: `NULL`.
+- No rule incident or quarantine was created.
+- The fault was cleared through the authenticated API.
+
+## Step F: Benchmark Review
+
+Run the four-condition benchmark and plotting post-processing:
+
+```sh
+python3 benchmarks/run_experiments.py
+python3 benchmarks/plot_results.py
+```
+
+Measured `benchmarks/results.csv` rows:
+
+| Condition | Requests | Failure rate | Mean ms | P95 ms | P99 ms |
+|---|---:|---:|---:|---:|---:|
+| `baseline_round_robin` | 21682 | 1.0 | 1.38 | 2.03 | 4.15 |
+| `gray_failure_without_shlb` | 20374 | 1.0 | 1.47 | 2.26 | 3.68 |
+| `gray_failure_shlb_active` | 13504 | 1.0 | 2.21 | 4.12 | 7.99 |
+| `traditional_proxy_ejection` | 18864 | 1.0 | 1.58 | 2.34 | 3.40 |
+
+The generated chart files were measured at `85592` bytes for
+`benchmarks/latency_percentiles.png` and `50281` bytes for
+`benchmarks/failure_rate.png`.
+
+The benchmark runner's HTTPS client did not disable verification for the
+self-signed local certificate, so its recorded failure rates are the measured
+results of that run and are not presented as application-failure claims.
+
+## Cleanup
+
+Clear any active LAB fault through the authenticated API and confirm that no
+fault has status `REQUESTED`, `ACTIVE`, or `CLEAR_REQUESTED`. For a disposable
+clean stack:
+
+```sh
+./local-down
+```
+
+The current Golden inventory walkthrough is pending the earlier evidence
+collector generalization; no successful inventory incident MTTD or recovery
+timing is claimed here.
+
+## Regression Proof
+
+For the original seeded 4x3 topology, the measured regression bundle passed:
+
+```sh
+git log -1 --oneline
+docker compose exec -T control-api pytest
+python3 scripts/test_safety_scenarios.py
+./local-smoke
+```
+
+The control API suite reported `40 passed`; the safety suite and flagship
+smoke completed successfully.
 # EBMSH Live Demo Script
 
 ## Start Clean

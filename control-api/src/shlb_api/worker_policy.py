@@ -78,6 +78,9 @@ def classify(
     probes: dict[str, dict],
     conflicts: list[str],
     statistical_support: dict[str, dict] | None = None,
+    *,
+    routes: tuple[str, ...] | None = None,
+    instances: tuple[str, ...] | None = None,
 ) -> RuleDecision:
     """Evaluate every (route, instance) cell in the registered topology.
 
@@ -90,8 +93,10 @@ def classify(
     HYBRID_ACTIVE only after ...".
     """
     statistical_support = statistical_support or {}
-    available = sum(1 for route in ROUTES for instance in INSTANCES if _member(evidence, route, instance).get("samples", 0) > 0)
-    completeness = round(available / (len(ROUTES) * len(INSTANCES)), 3)
+    routes = routes or ROUTES
+    instances = instances or INSTANCES
+    available = sum(1 for route in routes for instance in instances if _member(evidence, route, instance).get("samples", 0) > 0)
+    completeness = round(available / (len(routes) * len(instances)), 3)
 
     if conflicts:
         return RuleDecision(
@@ -101,10 +106,10 @@ def classify(
         )
 
     # 1. SHARED_ROUTE_FAILURE: every physical instance serving this route fails.
-    for route in ROUTES:
-        route_members = {instance: _member(evidence, route, instance) for instance in INSTANCES}
-        route_probes = {instance: probes.get(f"{route}/{instance}", {}) for instance in INSTANCES}
-        if all(_failing(route_members[instance], CONTROL_MINIMUM_SAMPLES) and route_probes[instance].get("application_ok") is False for instance in INSTANCES):
+    for route in routes:
+        route_members = {instance: _member(evidence, route, instance) for instance in instances}
+        route_probes = {instance: probes.get(f"{route}/{instance}", {}) for instance in instances}
+        if all(_failing(route_members[instance], CONTROL_MINIMUM_SAMPLES) and route_probes[instance].get("application_ok") is False for instance in instances):
             return RuleDecision(
                 "SHARED_ROUTE_FAILURE", route, None, 0.97, completeness,
                 {"route_peers": route_members, "direct_probes": route_probes, "shadow_statistical_signal": statistical_support},
@@ -112,10 +117,10 @@ def classify(
             )
 
     # 2. INSTANCE_DOWN: every route served by this physical instance fails.
-    for instance in INSTANCES:
-        instance_members = {route: _member(evidence, route, instance) for route in ROUTES}
-        instance_probes = {route: probes.get(f"{route}/{instance}", {}) for route in ROUTES}
-        if all(instance_probes[route].get("application_ok") is False for route in ROUTES):
+    for instance in instances:
+        instance_members = {route: _member(evidence, route, instance) for route in routes}
+        instance_probes = {route: probes.get(f"{route}/{instance}", {}) for route in routes}
+        if all(instance_probes[route].get("application_ok") is False for route in routes):
             return RuleDecision(
                 "INSTANCE_DOWN", None, instance, 0.99, completeness,
                 {"same_instance_routes": instance_members, "direct_probes": instance_probes, "shadow_statistical_signal": statistical_support},
@@ -124,11 +129,11 @@ def classify(
 
     # 3. ROUTE_INSTANCE_FAILURE: exactly one cell fails while its route peers
     #    and instance siblings stay healthy and reachable.
-    for route in ROUTES:
-        for instance in INSTANCES:
+    for route in routes:
+        for instance in instances:
             target = _member(evidence, route, instance)
-            peer_instances = [other for other in INSTANCES if other != instance]
-            sibling_routes = [other for other in ROUTES if other != route]
+            peer_instances = [other for other in instances if other != instance]
+            sibling_routes = [other for other in routes if other != route]
             peers_healthy = all(_healthy(_member(evidence, route, peer), CONTROL_MINIMUM_SAMPLES) for peer in peer_instances)
             siblings_healthy = all(_healthy(_member(evidence, sibling, instance), CONTROL_MINIMUM_SAMPLES) for sibling in sibling_routes)
             target_probe = probes.get(f"{route}/{instance}", {})
@@ -160,8 +165,8 @@ def classify(
                 )
 
     # 4. HEALTHY: every cell in the topology is within bound and reachable.
-    all_healthy = all(_healthy(_member(evidence, route, instance), 1) for route in ROUTES for instance in INSTANCES) and all(
-        probes.get(f"{route}/{instance}", {}).get("application_ok") is True for route in ROUTES for instance in INSTANCES
+    all_healthy = all(_healthy(_member(evidence, route, instance), 1) for route in routes for instance in instances) and all(
+        probes.get(f"{route}/{instance}", {}).get("application_ok") is True for route in routes for instance in instances
     )
     if all_healthy:
         return RuleDecision(
@@ -171,7 +176,7 @@ def classify(
         )
 
     # 5. UNKNOWN: evidence is incomplete or does not support any single scoped hypothesis.
-    missing = [f"{route}/{instance}" for route in ROUTES for instance in INSTANCES if _member(evidence, route, instance).get("samples", 0) < CONTROL_MINIMUM_SAMPLES]
+    missing = [f"{route}/{instance}" for route in routes for instance in instances if _member(evidence, route, instance).get("samples", 0) < CONTROL_MINIMUM_SAMPLES]
     return RuleDecision(
         "UNKNOWN", None, None, 0.0, completeness,
         {"reason": "mandatory comparisons are incomplete", "missing_or_sparse": missing, "shadow_statistical_signal": statistical_support},

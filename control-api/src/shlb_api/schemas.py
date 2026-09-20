@@ -198,9 +198,10 @@ class RetryPolicyCreate(BaseModel):
 class LabFaultCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    scenario: str = Field(
-        pattern=r"^(CHECKOUT_INST_B_FAILURE|AUTH_INST_A_FAILURE|GRAY_FAILURE_INST_A|INST_B_DOWN|SHARED_CHECKOUT_FAILURE|UNKNOWN_CONFLICT)$"
-    )
+    scenario: str = Field(min_length=1, max_length=48)
+    scenario_kind: str | None = Field(default=None, pattern=r"^(route_failure|instance_down|gray_failure|unknown_conflict)$")
+    target_route: str | None = Field(default=None, min_length=1, max_length=80)
+    target_instance: str | None = Field(default=None, min_length=1, max_length=80)
     duration_seconds: int = Field(default=120, ge=5, le=600)
 
 

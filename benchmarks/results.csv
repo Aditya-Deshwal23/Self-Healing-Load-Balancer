@@ -1,0 +1,5 @@
+scenario,requests,failure_rate,p95_ms,p99_ms,mean_ms,mttd_seconds,mttr_seconds
+baseline_round_robin,21682,1.0,2.03,4.15,1.38,,
+gray_failure_without_shlb,20374,1.0,2.26,3.68,1.47,,
+gray_failure_shlb_active,13504,1.0,4.12,7.99,2.21,,
+traditional_proxy_ejection,18864,1.0,2.34,3.4,1.58,,

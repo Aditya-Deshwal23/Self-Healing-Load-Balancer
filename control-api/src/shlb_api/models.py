@@ -572,6 +572,7 @@ class LabFault(Base, TimestampMixin, VersionMixin):
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     environment_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("environments.id", ondelete="CASCADE"), nullable=False)
     scenario: Mapped[str] = mapped_column(String(48), nullable=False)
+    scenario_kind: Mapped[str | None] = mapped_column(String(24))
     target_route: Mapped[str | None] = mapped_column(String(80))
     target_instance: Mapped[str | None] = mapped_column(String(80))
     duration_seconds: Mapped[int] = mapped_column(Integer, nullable=False)

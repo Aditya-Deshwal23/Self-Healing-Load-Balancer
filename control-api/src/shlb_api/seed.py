@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import uuid
 from datetime import UTC, datetime
 
@@ -197,29 +198,29 @@ def seed() -> None:
             db.add(deployment)
         db.flush()
 
-        for stable_name, instance_id in INSTANCE_IDS.items():
-            if db.get(BackendInstance, instance_id) is None:
-                docker_name = f"demo-backend-{stable_name[-1]}"
-                db.add(
-                    BackendInstance(
-                        id=instance_id,
-                        service_id=service.id,
-                        version_id=deployment.id,
-                        stable_name=stable_name,
-                        address_ciphertext=encrypt_field(docker_name),
-                        port=8080,
-                        capacity=100,
-                        probe_profile="phase1-http-healthz",
-                        status="ACTIVE",
-                    )
-                )
-
         route_specs = {
             "public": (10, "STANDARD"),
             "auth": (20, "HIGH"),
             "catalog": (30, "STANDARD"),
             "checkout": (40, "CRITICAL"),
-        }
+        } if os.environ.get("SHLB_SEED_TOPOLOGY", "true").lower() not in {"0", "false", "no"} else {}
+        if route_specs:
+            for stable_name, instance_id in INSTANCE_IDS.items():
+                if db.get(BackendInstance, instance_id) is None:
+                    docker_name = f"demo-backend-{stable_name[-1]}"
+                    db.add(
+                        BackendInstance(
+                            id=instance_id,
+                            service_id=service.id,
+                            version_id=deployment.id,
+                            stable_name=stable_name,
+                            address_ciphertext=encrypt_field(docker_name),
+                            port=8080,
+                            capacity=100,
+                            probe_profile="phase1-http-healthz",
+                            status="ACTIVE",
+                        )
+                    )
         for route_key, (priority, criticality) in route_specs.items():
             if db.get(RouteGroup, ROUTE_IDS[route_key]) is None:
                 db.add(

@@ -17,7 +17,11 @@ from urllib.parse import urlsplit
 
 INSTANCE_ID = os.environ.get("INSTANCE_ID", "inst-unknown")
 VERSION_ID = os.environ.get("VERSION_ID", "demo-v1")
-ALLOWED_ROUTES = frozenset({"public", "auth", "catalog", "checkout"})
+ALLOWED_ROUTES = frozenset(
+    route.strip().strip("/")
+    for route in os.environ.get("ALLOWED_ROUTES", "public,auth,catalog,checkout").split(",")
+    if route.strip().strip("/")
+)
 FAULT_TOKEN_FILE = Path(os.environ.get("FAULT_TOKEN_FILE", "/run/secrets/fault_control_token"))
 
 
@@ -204,8 +208,8 @@ class Handler(BaseHTTPRequestHandler):
         failed = self._fault_affects(route, fault)
         gray = bool(fault and fault["kind"] == "gray_failure")
         if gray:
-            time.sleep(0.5)
-            failed = random.random() < 0.4
+            time.sleep(0.35)
+            failed = random.random() < 0.025
         status = HTTPStatus.INTERNAL_SERVER_ERROR if failed and gray else HTTPStatus.SERVICE_UNAVAILABLE if failed else HTTPStatus.OK
         payload = {
             "instance": INSTANCE_ID,

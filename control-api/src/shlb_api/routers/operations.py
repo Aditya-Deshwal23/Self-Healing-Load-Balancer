@@ -104,6 +104,7 @@ def _fault_data(row: LabFault) -> dict:
         "id": str(row.id),
         "environment_id": str(row.environment_id),
         "scenario": row.scenario,
+        "scenario_kind": row.scenario_kind,
         "target": {"route": row.target_route, "instance": row.target_instance},
         "duration_seconds": row.duration_seconds,
         "status": row.status,
@@ -278,16 +279,27 @@ def create_fault(environment_id: uuid.UUID, payload: LabFaultCreate, request: Re
         response.status_code = replay.response_status
         response.headers["Idempotent-Replay"] = "true"
         return replay.response_body
-    target_map = {
-        "CHECKOUT_INST_B_FAILURE": ("checkout", "inst-b"),
-        "AUTH_INST_A_FAILURE": ("auth", "inst-a"),
-        "GRAY_FAILURE_INST_A": (None, "inst-a"),
-        "INST_B_DOWN": (None, "inst-b"),
-        "SHARED_CHECKOUT_FAILURE": ("checkout", "all"),
-        "UNKNOWN_CONFLICT": ("checkout", "inst-b"),
+    legacy_faults = {
+        "CHECKOUT_INST_B_FAILURE": ("route_failure", "checkout", "inst-b"),
+        "AUTH_INST_A_FAILURE": ("route_failure", "auth", "inst-a"),
+        "GRAY_FAILURE_INST_A": ("gray_failure", None, "inst-a"),
+        "INST_B_DOWN": ("instance_down", None, "inst-b"),
+        "SHARED_CHECKOUT_FAILURE": ("route_failure", "checkout", "all"),
+        "UNKNOWN_CONFLICT": ("unknown_conflict", "checkout", "inst-b"),
     }
-    target_route, target_instance = target_map[payload.scenario]
-    fault = LabFault(environment_id=environment.id, scenario=payload.scenario, target_route=target_route, target_instance=target_instance, duration_seconds=payload.duration_seconds, requested_by=auth.user.id, status="REQUESTED", ground_truth_id=f"gt-{uuid.uuid4().hex[:20]}", expires_at=utc_now() + timedelta(seconds=payload.duration_seconds))
+    legacy = legacy_faults.get(payload.scenario)
+    if legacy:
+        scenario_kind, legacy_route, legacy_instance = legacy
+        scenario_kind = payload.scenario_kind or scenario_kind
+        target_route = payload.target_route if payload.target_route is not None else legacy_route
+        target_instance = payload.target_instance if payload.target_instance is not None else legacy_instance
+    else:
+        if payload.scenario_kind is None:
+            raise ApiProblem(status=422, code="INVALID_FAULT", title="Scenario kind is required", detail="Generic LAB scenarios must provide scenario_kind.")
+        scenario_kind = payload.scenario_kind
+        target_route = payload.target_route
+        target_instance = payload.target_instance
+    fault = LabFault(environment_id=environment.id, scenario=payload.scenario, scenario_kind=scenario_kind, target_route=target_route, target_instance=target_instance, duration_seconds=payload.duration_seconds, requested_by=auth.user.id, status="REQUESTED", ground_truth_id=f"gt-{uuid.uuid4().hex[:20]}", expires_at=utc_now() + timedelta(seconds=payload.duration_seconds))
     db.add(fault)
     db.flush()
     data = _fault_data(fault)

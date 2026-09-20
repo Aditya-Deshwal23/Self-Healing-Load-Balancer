@@ -55,11 +55,11 @@ def run(label: str, base_url: str, seconds: int) -> dict[str, float | str]:
     }
 
 
-def compose_fault(action: str, duration: int = 30) -> None:
+def compose_fault(action: str, duration: int = 30, kind: str = "gray_failure") -> None:
     """Use the real private backend fault endpoint through Compose."""
     token = Path(".secrets/fault_control_token").read_text(encoding="utf-8").strip()
     payload = json.dumps({
-        "kind": "gray_failure",
+        "kind": kind,
         "expires_at": time.time() + duration,
         "ground_truth_id": f"benchmark-{int(time.time())}",
     })
@@ -71,6 +71,24 @@ def compose_fault(action: str, duration: int = 30) -> None:
                    token,
                ]
     subprocess.run(command, check=True)
+
+
+def wait_for_backend_health() -> None:
+    subprocess.run(["docker", "compose", "restart", "demo-backend-a"], check=True)
+    container = subprocess.check_output(
+        ["docker", "compose", "ps", "-q", "demo-backend-a"],
+        text=True,
+    ).strip()
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        health = subprocess.check_output(
+            ["docker", "inspect", "-f", "{{.State.Health.Status}}", container],
+            text=True,
+        ).strip()
+        if health == "healthy":
+            return
+        time.sleep(1)
+    raise RuntimeError("demo-backend-a did not become healthy after instance_down cleanup")
 
 
 def main() -> None:
@@ -92,6 +110,14 @@ def main() -> None:
         results.append(run("gray_failure_shlb_active", args.base_url, args.seconds))
     finally:
         compose_fault("clear")
+    subprocess.run(["docker", "compose", "stop", "control-worker"], check=True)
+    compose_fault("start", args.seconds + 15, kind="instance_down")
+    try:
+        results.append(run("traditional_proxy_ejection", args.base_url, args.seconds))
+    finally:
+        compose_fault("clear")
+        wait_for_backend_health()
+        subprocess.run(["docker", "compose", "start", "control-worker"], check=True)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=results[0].keys())

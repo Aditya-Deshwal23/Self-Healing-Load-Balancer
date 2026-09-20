@@ -30,6 +30,7 @@ from shlb_api.idempotency import find_replay, require_idempotency_key, store_rec
 from shlb_api.models import (
     BackendInstance,
     DeploymentVersion,
+    DesiredRouteState,
     Environment,
     Project,
     RetryPolicy,
@@ -779,6 +780,17 @@ def create_membership(
     )
     db.add(membership)
     try:
+        db.flush()
+        db.add(
+            DesiredRouteState(
+                environment_id=environment.id,
+                membership_id=membership.id,
+                admin_state="ready",
+                weight=membership.baseline_weight,
+                controller_generation=environment.controller_generation,
+                source_action_id=None,
+            )
+        )
         db.flush()
         data = membership_resource(membership)
         response_body = resource_envelope(request, data)

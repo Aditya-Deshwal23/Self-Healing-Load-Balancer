@@ -8,6 +8,7 @@ x-demo-backend: &demo-backend
   restart: unless-stopped
   environment:
     VERSION_ID: demo-v1
+    ALLOWED_ROUTES: public,auth,catalog,checkout
   expose:
     - "8080"
   secrets:
@@ -114,6 +115,7 @@ services:
       SHLB_REDIS_PORT: "6379"
       SHLB_COOKIE_SECURE: "true"
       SHLB_ALLOWED_ORIGINS: ${SHLB_ALLOWED_ORIGINS:-https://localhost:8443,https://127.0.0.1:8443}
+      SHLB_SEED_TOPOLOGY: ${SHLB_SEED_TOPOLOGY:-true}
     secrets:
       - postgres_password
       - redis_password
@@ -428,6 +430,9 @@ services:
       TARGET_HOST: traffic-haproxy
       TARGET_PORT: "8080"
       REQUESTS_PER_SECOND: "40"
+      MAX_REQUESTS_PER_SECOND: "60"
+      TRAFFIC_PROFILE: steady
+      TRAFFIC_ROUTES: public,auth,catalog,checkout
     networks:
       - data_edge_net
     read_only: true
@@ -448,18 +453,21 @@ services:
     environment:
       INSTANCE_ID: inst-a
       VERSION_ID: demo-v1
+      ALLOWED_ROUTES: public,auth,catalog,checkout
 
   demo-backend-b:
     <<: *demo-backend
     environment:
       INSTANCE_ID: inst-b
       VERSION_ID: demo-v1
+      ALLOWED_ROUTES: public,auth,catalog,checkout
 
   demo-backend-c:
     <<: *demo-backend
     environment:
       INSTANCE_ID: inst-c
       VERSION_ID: demo-v1
+      ALLOWED_ROUTES: public,auth,catalog,checkout
 
 networks:
   data_edge_net:

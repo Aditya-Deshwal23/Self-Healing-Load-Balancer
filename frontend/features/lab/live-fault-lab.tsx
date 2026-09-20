@@ -13,7 +13,7 @@ const scenarios = [
     title: "Simulate gray failure on Backend A",
     target: "all routes × inst-a",
     classification: "FAST-PATH ATTENUATION",
-    detail: "2s latency with 20% HTTP 500 responses; binary health remains reachable.",
+    detail: "350ms latency with a low error rate; binary health remains reachable.",
   },
   {
     id: "CHECKOUT_INST_B_FAILURE",
