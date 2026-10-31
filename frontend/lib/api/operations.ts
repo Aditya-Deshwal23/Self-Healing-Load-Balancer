@@ -9,6 +9,7 @@ export type OperationalIncident = {
   environment_id: string;
   route_id: string | null;
   instance_id: string | null;
+  target: { route: string | null; instance: string | null };
   status: string;
   severity: string;
   classification: string;
@@ -78,10 +79,31 @@ export type MatrixCell = {
   evidence: {
     samples?: number;
     errors?: number;
+    status_codes?: Record<string, number>;
     error_rate?: number | null;
     p95_ms?: number | null;
   };
+  direct_probe?: {
+    reachable?: boolean;
+    application_ok?: boolean;
+    status?: number | null;
+  };
   incident_id: string | null;
+};
+export type TrafficHistory = {
+  range_seconds: number;
+  bucket_seconds: number;
+  observation_window_seconds: number;
+  points: Array<{
+    at: string;
+    routes: Record<string, {
+      requests_per_second: number | null;
+      errors_per_second: number | null;
+      error_rate: number | null;
+      worst_instance_p95_ms: number | null;
+      samples: number;
+    }>;
+  }>;
 };
 export type OperationalSummary = {
   environment: {
@@ -110,9 +132,28 @@ export type OperationalSummary = {
     generation: number | null;
     last_heartbeat_at: string | null;
   };
+  lab_reset: null | {
+    id: string;
+    status: string;
+    result: Record<string, unknown>;
+    created_at: string;
+    completed_at: string | null;
+  };
 };
 export type DecisionTraceData = {
   incident: OperationalIncident;
+  lab_fault: null | {
+    id: string;
+    scenario: string;
+    scenario_kind: string | null;
+    target: { route: string | null; instance: string | null };
+    duration_seconds: number;
+    status: string;
+    ground_truth_id: string;
+    applied_at: string | null;
+    expires_at: string;
+    cleared_at: string | null;
+  };
   evidence: null | {
     window_id: string;
     started_at: string;
@@ -150,6 +191,7 @@ export type DecisionTraceData = {
     affected: Record<string, unknown>;
     preservation: Record<string, unknown>;
     sample_count: number;
+    completed_at: string | null;
   };
   recovery: null | {
     id: string;
@@ -188,6 +230,7 @@ export type RecoveryDetail = RecoveryRun & {
 export type LabFault = {
   id: string;
   scenario: string;
+  scenario_kind: string;
   target: { route: string | null; instance: string | null };
   duration_seconds: number;
   status: string;
@@ -220,10 +263,18 @@ export function useOperationalSummary() {
     3000,
   );
 }
+export function useTrafficHistory() {
+  return useEnvironmentQuery<TrafficHistory>(
+    "traffic-history",
+    (id) => `/api/v1/environments/${id}/traffic-history`,
+    5000,
+  );
+}
 export function useMatrix() {
   return useEnvironmentQuery<{
     environment_id: string;
     observed_at: string | null;
+    evidence_window_ended_at: string | null;
     cells: MatrixCell[];
   }>("matrix", (id) => `/api/v1/environments/${id}/matrix`, 3000);
 }
@@ -309,9 +360,15 @@ export function useCreateFault() {
   return useMutation({
     mutationFn: async ({
       scenario,
+      scenarioKind,
+      targetRoute,
+      targetInstance,
       durationSeconds,
     }: {
       scenario: string;
+      scenarioKind: "route_failure" | "instance_down" | "gray_failure" | "unknown_conflict";
+      targetRoute: string | null;
+      targetInstance: string | null;
       durationSeconds: number;
     }) =>
       (
@@ -326,6 +383,9 @@ export function useCreateFault() {
             },
             body: JSON.stringify({
               scenario,
+              scenario_kind: scenarioKind,
+              target_route: targetRoute,
+              target_instance: targetInstance,
               duration_seconds: durationSeconds,
             }),
           },
@@ -359,6 +419,30 @@ export function useClearFault() {
       await client.invalidateQueries({
         queryKey: ["environment", environmentId],
       });
+    },
+  });
+}
+
+export function useResetLab() {
+  const control = useControlPlane();
+  const client = useQueryClient();
+  const environmentId = control.status?.environment.id;
+  return useMutation({
+    mutationFn: async () =>
+      (
+        await apiRequest<NonNullable<OperationalSummary["lab_reset"]>>(
+          `/api/v1/environments/${environmentId}/lab/reset`,
+          {
+            method: "POST",
+            headers: {
+              "X-CSRF-Token": control.session!.csrf_token,
+              "Idempotency-Key": crypto.randomUUID(),
+            },
+          },
+        )
+      ).data,
+    onSuccess: async () => {
+      await client.invalidateQueries({ queryKey: ["environment", environmentId] });
     },
   });
 }

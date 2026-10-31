@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import json
 import os
+import random
+import re
 import threading
 import time
-import random
+import uuid
 from collections import defaultdict
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -37,6 +40,7 @@ FAULT_TOKEN = _read_fault_token()
 STATE_LOCK = threading.RLock()
 FAULT: dict[str, object] | None = None
 REQUESTS: defaultdict[tuple[str, str], int] = defaultdict(int)
+STATUS_CODES: defaultdict[tuple[str, int], int] = defaultdict(int)
 LATENCY_SECONDS: defaultdict[str, float] = defaultdict(float)
 LATENCY_BUCKET_BOUNDS = (0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0)
 LATENCY_BUCKETS: defaultdict[tuple[str, float], int] = defaultdict(int)
@@ -57,6 +61,7 @@ def _status_family(status: HTTPStatus) -> str:
 def _prometheus() -> bytes:
     with STATE_LOCK:
         request_rows = sorted(REQUESTS.items())
+        status_code_rows = sorted(STATUS_CODES.items())
         latency_rows = sorted(LATENCY_SECONDS.items())
         bucket_rows = sorted(LATENCY_BUCKETS.items())
     fault = _active_fault()
@@ -68,6 +73,16 @@ def _prometheus() -> bytes:
     for (route, family), value in request_rows:
         lines.append(
             f'shlb_backend_requests_total{{{identity},route="{route}",status_family="{family}"}} {value}'
+        )
+    lines.extend(
+        [
+            "# HELP shlb_backend_responses_total Real application responses by exact HTTP status.",
+            "# TYPE shlb_backend_responses_total counter",
+        ]
+    )
+    for (route, status_code), value in status_code_rows:
+        lines.append(
+            f'shlb_backend_responses_total{{{identity},route="{route}",status_code="{status_code}"}} {value}'
         )
     lines.extend(
         [
@@ -95,6 +110,14 @@ def _prometheus() -> bytes:
 class Handler(BaseHTTPRequestHandler):
     server_version = "shlb-demo/3"
     protocol_version = "HTTP/1.1"
+
+    def handle(self) -> None:
+        # Short-lived LAB probes can close a pooled socket between requests.
+        # Treat that as a peer disconnect, not an application traceback.
+        try:
+            super().handle()
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
 
     def do_GET(self) -> None:  # noqa: N802 - stdlib handler contract
         self._serve(include_body=True)
@@ -211,18 +234,25 @@ class Handler(BaseHTTPRequestHandler):
             time.sleep(0.35)
             failed = random.random() < 0.025
         status = HTTPStatus.INTERNAL_SERVER_ERROR if failed and gray else HTTPStatus.SERVICE_UNAVAILABLE if failed else HTTPStatus.OK
+        supplied_request_id = self.headers.get("X-Request-ID", "")
+        request_id = supplied_request_id if re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", supplied_request_id) else uuid.uuid4().hex
+        failure_fingerprint = hashlib.sha256(
+            f"application-v1|{route}|{int(status)}|{_status_family(status)}".encode("utf-8")
+        ).hexdigest()[:16] if int(status) >= 500 else None
         payload = {
             "instance": INSTANCE_ID,
             "version": VERSION_ID,
             "route": route,
             "path": path,
-            "request_id": self.headers.get("X-Request-ID"),
+            "request_id": request_id,
+            "failure_fingerprint": failure_fingerprint,
             "result": "lab_fault" if failed else "ok",
         }
-        self._json(status, payload, include_body=include_body)
+        self._json(status, payload, include_body=include_body, headers={"X-Request-ID": request_id})
         elapsed = time.monotonic() - started
         with STATE_LOCK:
             REQUESTS[(route, _status_family(status))] += 1
+            STATUS_CODES[(route, int(status))] += 1
             LATENCY_SECONDS[route] += elapsed
             for bound in LATENCY_BUCKET_BOUNDS:
                 if elapsed <= bound:
@@ -234,7 +264,12 @@ class Handler(BaseHTTPRequestHandler):
                     "instance": INSTANCE_ID,
                     "version": VERSION_ID,
                     "route": route,
+                    "path": path,
+                    "method": self.command,
+                    "status_code": int(status),
                     "status_family": _status_family(status),
+                    "request_id": request_id,
+                    "failure_fingerprint": failure_fingerprint,
                     "duration_ms": round(elapsed * 1000, 3),
                 },
                 separators=(",", ":"),
@@ -254,18 +289,23 @@ class Handler(BaseHTTPRequestHandler):
         # persisted ground truth says the evidence channel is unreliable.
         return False
 
-    def _json(self, status: HTTPStatus, payload: object, *, include_body: bool = True) -> None:
+    def _json(self, status: HTTPStatus, payload: object, *, include_body: bool = True, headers: dict[str, str] | None = None) -> None:
         body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-        self._raw(status, body, "application/json", include_body)
+        self._raw(status, body, "application/json", include_body, headers=headers)
 
-    def _raw(self, status: HTTPStatus, body: bytes, content_type: str, include_body: bool) -> None:
-        self.send_response(status)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        if include_body:
-            self.wfile.write(body)
+    def _raw(self, status: HTTPStatus, body: bytes, content_type: str, include_body: bool, *, headers: dict[str, str] | None = None) -> None:
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            for name, value in (headers or {}).items():
+                self.send_header(name, value)
+            self.end_headers()
+            if include_body:
+                self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
 
     def log_message(self, format: str, *args: object) -> None:
         return

@@ -196,9 +196,9 @@ services:
     healthcheck:
       test: ["CMD", "python", "-m", "shlb_api.worker_health"]
       interval: 5s
-      timeout: 3s
+      timeout: 10s
       retries: 20
-      start_period: 15s
+      start_period: 30s
     logging:
       driver: json-file
       options:
@@ -253,6 +253,8 @@ services:
     expose:
       - "8080"
       - "8404"
+    ports:
+      - "127.0.0.1:8404:8404"
     volumes:
       - ./haproxy:/usr/local/etc/haproxy:ro
       - haproxy-runtime:/var/run/haproxy

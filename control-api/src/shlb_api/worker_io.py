@@ -19,9 +19,9 @@ class HAProxyRuntimeError(RuntimeError):
 
 
 class HAProxyRuntime:
-    def __init__(self, path: str = "/var/run/haproxy/admin.sock", timeout: float = 0.15):
+    def __init__(self, path: str = "/var/run/haproxy/admin.sock", timeout: float = 0.75):
         self.path = path
-        self.timeout = min(timeout, 0.15)
+        self.timeout = min(timeout, 0.75)
         self._previous_5xx: dict[str, int] = {}
         self._previous_sessions_total: dict[str, int] = {}
 
@@ -206,8 +206,8 @@ class PrometheusEvidence:
         return payload["data"]["result"]
 
     def collect(self, window: str = "12s") -> dict[str, dict]:
-        evidence = {f"{route}/{instance}": {"samples": 0, "errors": 0, "error_rate": None, "p95_ms": None} for route in ROUTES for instance in INSTANCES}
-        rows = self.query(f"sum by (instance,route,status_family) (increase(shlb_backend_requests_total[{window}]))")
+        evidence = {f"{route}/{instance}": {"samples": 0, "errors": 0, "status_codes": {}, "error_rate": None, "p95_ms": None} for route in ROUTES for instance in INSTANCES}
+        rows = self.query(f"sum by (instance,route,status_family,status_code) (increase(shlb_backend_responses_total[{window}]))")
         for row in rows:
             metric = row.get("metric", {})
             key = f"{metric.get('route')}/{metric.get('instance')}"
@@ -215,7 +215,10 @@ class PrometheusEvidence:
                 continue
             value = max(0, int(round(float(row["value"][1]))))
             evidence[key]["samples"] += value
-            if metric.get("status_family") == "5xx":
+            status_code = metric.get("status_code")
+            if status_code is not None:
+                evidence[key]["status_codes"][status_code] = evidence[key]["status_codes"].get(status_code, 0) + value
+            if metric.get("status_family") == "5xx" or (status_code and status_code.startswith("5")):
                 evidence[key]["errors"] += value
         p95_rows = self.query(f"histogram_quantile(0.95, sum by (le,instance,route) (rate(shlb_backend_request_duration_seconds_bucket[{window}])))")
         p95 = {f"{row.get('metric', {}).get('route')}/{row.get('metric', {}).get('instance')}": float(row["value"][1]) for row in p95_rows}
@@ -233,6 +236,7 @@ class LabProbeClient:
             raise RuntimeError("LAB fault token is unavailable")
         self.headers = {"X-SHLB-Lab-Token": token}
         self.client = httpx.Client(timeout=httpx.Timeout(1.5, connect=0.75), headers=self.headers)
+        self.mutation_timeout = httpx.Timeout(5.0, connect=1.0)
 
     @staticmethod
     def host(instance: str) -> str:
@@ -254,11 +258,45 @@ class LabProbeClient:
         return results
 
     def apply_fault(self, instance: str, payload: dict) -> dict:
-        response = self.client.put(f"{self.host(instance)}/__lab/fault", json=payload)
-        response.raise_for_status()
-        return response.json()
+        url = f"{self.host(instance)}/__lab/fault"
+        try:
+            response = self.client.put(url, json=payload, timeout=self.mutation_timeout)
+            response.raise_for_status()
+            return response.json()
+        except httpx.TransportError:
+            # The demo backend applies the absolute fault state before it
+            # writes the response. Recover a lost acknowledgement by reading
+            # its private status endpoint instead of marking an applied fault
+            # FAILED or replaying an ambiguous mutation.
+            observed = self._fault_status(instance)
+            fault = observed.get("fault")
+            if fault and all(
+                fault.get(key) == payload.get(key)
+                for key in ("kind", "route", "ground_truth_id")
+            ):
+                return {"status": "active", "instance": instance, "fault": fault, "acknowledgement_recovered": True}
+            raise
 
     def clear_fault(self, instance: str) -> dict:
-        response = self.client.delete(f"{self.host(instance)}/__lab/fault")
+        url = f"{self.host(instance)}/__lab/fault"
+        try:
+            response = self.client.delete(url, timeout=self.mutation_timeout)
+            response.raise_for_status()
+            return response.json()
+        except httpx.TransportError:
+            observed = self._fault_status(instance)
+            if observed.get("fault") is None:
+                return {
+                    "status": "cleared",
+                    "instance": instance,
+                    "acknowledgement_recovered": True,
+                }
+            raise
+
+    def _fault_status(self, instance: str) -> dict:
+        response = self.client.get(
+            f"{self.host(instance)}/__lab/status",
+            timeout=self.mutation_timeout,
+        )
         response.raise_for_status()
         return response.json()

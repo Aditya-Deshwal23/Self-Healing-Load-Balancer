@@ -164,6 +164,38 @@ def classify(
                     True,
                 )
 
+    # Mark sustained, above-baseline 5xx even when probes still answer. This
+    # is a non-actuating warning: request errors can precede a hard failure,
+    # but probe/peer disagreement is not enough to drain production traffic.
+    for route in routes:
+        for instance in instances:
+            target = _member(evidence, route, instance)
+            target_probe = probes.get(f"{route}/{instance}", {})
+            elevated_error_rate = (
+                target.get("samples", 0) >= CONTROL_MINIMUM_SAMPLES
+                and target.get("error_rate") is not None
+                and target["error_rate"] > HEALTHY_RATE
+            )
+            probe_failure = (
+                target.get("samples", 0) >= CONTROL_MINIMUM_SAMPLES
+                and target_probe.get("application_ok") is False
+            )
+            if elevated_error_rate or probe_failure:
+                return RuleDecision(
+                    "ROUTE_INSTANCE_DEGRADED", route, instance, 0.75, completeness,
+                    {
+                        "target": target,
+                        "direct_probe": target_probe,
+                        "same_route_peers": {peer: _member(evidence, route, peer) for peer in instances if peer != instance},
+                        "same_instance_other_routes": {sibling: _member(evidence, sibling, instance) for sibling in routes if sibling != route},
+                        "reason": "elevated 5xx or failing endpoint probe without complete isolation proof",
+                        "automatic_action": False,
+                        "shadow_statistical_signal": statistical_support,
+                    },
+                    [{"class": "ROUTE_INSTANCE_FAILURE", "rejected": "isolation threshold and peer/probe proof not met"}],
+                    False,
+                )
+
     # 4. HEALTHY: every cell in the topology is within bound and reachable.
     all_healthy = all(_healthy(_member(evidence, route, instance), 1) for route in routes for instance in instances) and all(
         probes.get(f"{route}/{instance}", {}).get("application_ok") is True for route in routes for instance in instances
