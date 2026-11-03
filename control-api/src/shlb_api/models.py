@@ -589,6 +589,19 @@ class LabFault(Base, TimestampMixin, VersionMixin):
     )
 
 
+class LabResetRequest(Base, TimestampMixin, VersionMixin):
+    __tablename__ = "lab_reset_requests"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    environment_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("environments.id", ondelete="CASCADE"), nullable=False)
+    requested_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"), nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False)
+    result: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (Index("ix_lab_reset_environment_status", "environment_id", "status", "created_at"),)
+
+
 class ControllerGeneration(Base, TimestampMixin):
     __tablename__ = "controller_generations"
 

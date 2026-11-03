@@ -34,7 +34,8 @@ const ControlPlaneContext = createContext<ControlPlaneContextValue | null>(null)
 const eventTypes = [
   "incident_detected", "classification_completed", "action_planned", "action_applied",
   "verification_updated", "reintegration_progress", "rollback_started", "incident_resolved",
-  "safe_mode_changed", "drift_detected", "lab_fault_applied", "lab_fault_cleared", "resync_required",
+  "safe_mode_changed", "drift_detected", "lab_fault_applied", "lab_fault_cleared",
+  "lab_reset_requested", "lab_reset_started", "lab_reset_completed", "lab_reset_needs_review", "resync_required",
 ];
 
 export function ControlPlaneProvider({ children }: { children: ReactNode }) {

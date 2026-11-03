@@ -72,6 +72,28 @@ export function LiveRecovery({ runId }: { runId?: string }) {
             </Link>
           }
         />
+        <Panel title="How recovery is gated" kicker="A fault ending does not immediately restore traffic">
+          <p>
+            For a quarantined single route membership, the worker first requires
+            3 consecutive successful direct probes. It then advances through
+            5%, 20%, 50%, and 100% traffic. Each stage waits through its cooldown,
+            requires its configured real-sample minimum, keeps the error rate at
+            or below 10%, and checks HAProxy Runtime readback.
+          </p>
+          <p>
+            If probes fail, the error rate rises, samples do not arrive in time,
+            or readback differs, traffic returns to the last verified weight
+            (or stays quarantined). The worker retries at most twice; if recovery
+            still cannot be verified, it marks the run NEEDS_REVIEW.
+          </p>
+          <p>
+            Instance-wide outages use a separate gate: all routes on that
+            instance must pass 3 consecutive probes before the worker restores
+            the original memberships and confirms readback. Shared-route,
+            gray-signal-only, and UNKNOWN scenarios do not create a recovery run
+            unless a routing action was actually committed.
+          </p>
+        </Panel>
         <Panel
           title="Evidence-gated stages"
           kicker="Last verified state is the rollback target"
@@ -93,7 +115,7 @@ export function LiveRecovery({ runId }: { runId?: string }) {
                   </span>
                   <small>
                     requested w {stage.requested_weight ?? "probe"} · observed w{" "}
-                    {stage.observed_weight ?? "—"}
+                    {stage.observed_weight ?? "—"} · {stage.sample_count}/{stage.minimum_samples} required samples
                   </small>
                   <ProgressBar
                     value={stage.sample_count}

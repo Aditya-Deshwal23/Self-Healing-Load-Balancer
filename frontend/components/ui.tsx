@@ -55,31 +55,32 @@ export function LiveConnectionStatus({
       ? Math.max(0, Math.floor((now - new Date(lastEventAt).getTime()) / 1000))
       : null
     : null;
-  const stale = ageSeconds !== null && ageSeconds > 30;
   const tone: Tone =
-    state === "connected" && !stale
+    state === "connected"
       ? "success"
-      : state === "reconnecting" || stale
+      : state === "reconnecting"
         ? "warning"
         : state === "offline"
           ? "danger"
           : "neutral";
   const label =
-    state === "connected" && !stale
+    state === "connected"
       ? "Live"
-      : stale
-        ? "Stale"
-        : state === "reconnecting"
-          ? "Reconnecting"
-          : state === "offline"
-            ? "Offline"
-            : "Connecting";
+      : state === "reconnecting"
+        ? "Reconnecting"
+        : state === "offline"
+          ? "Offline"
+          : "Connecting";
   const detail =
-    ageSeconds === null
-      ? "No events received"
-      : ageSeconds < 2
-        ? "Updated just now"
-        : `Updated ${ageSeconds}s ago`;
+    state !== "connected"
+      ? ageSeconds === null
+        ? "No events received"
+        : `Last event ${ageSeconds}s ago`
+      : ageSeconds === null
+        ? "Connected; waiting for events"
+        : ageSeconds < 2
+          ? "Connected; event received just now"
+          : `Connected; last event ${ageSeconds}s ago`;
   return (
     <span
       aria-label={`Control-plane stream ${label.toLowerCase()}. ${detail}.`}

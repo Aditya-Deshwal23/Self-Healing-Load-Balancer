@@ -158,6 +158,7 @@ export const classDescriptions: Record<FailureClass, { plain: string; action: st
   INSTANCE_DOWN: { plain: "Hard failure spans an instance's memberships.", action: "Complete-instance drain if physical reserve remains safe." },
   INSTANCE_DEGRADED: { plain: "Peer-relative degradation spans routes on one instance.", action: "Bounded instance weight reduction, then verify." },
   ROUTE_INSTANCE_FAILURE: { plain: "One route membership diverges while its siblings and peers counter-support broader scope.", action: "Route × instance quarantine." },
+  ROUTE_INSTANCE_DEGRADED: { plain: "Elevated 5xx or a failing endpoint probe is recorded without enough evidence to isolate safely.", action: "Mark and observe; do not drain until isolation evidence is conclusive." },
   SHARED_ROUTE_FAILURE: { plain: "The same route fails across peer instances.", action: "Suppress unsafe retry and apply route protection; do not mass-eject." },
   TRAFFIC_OVERLOAD: { plain: "Broad queue and load evidence explains degradation.", action: "Admission, rate, or concurrency protection." },
   VERSION_SPECIFIC_FAILURE: { plain: "A deployment cohort regresses against a comparable control cohort.", action: "Version membership removal if remaining capacity is safe." },

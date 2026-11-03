@@ -1,3 +1,4 @@
+import { Suspense } from "react";
 import type { Metadata } from "next";
 import { ConsoleRoutePage } from "@/components/console-route-page";
 import { staticConsoleSlugs, titleForPath } from "@/lib/routes";
@@ -15,5 +16,9 @@ export async function generateMetadata({ params }: { params: Promise<{ slug: str
 
 export default async function Page({ params }: { params: Promise<{ slug: string[] }> }) {
   const { slug } = await params;
-  return <ConsoleRoutePage slug={slug} />;
+  return (
+    <Suspense fallback={<div className="page-stack">Loading console…</div>}>
+      <ConsoleRoutePage slug={slug} />
+    </Suspense>
+  );
 }

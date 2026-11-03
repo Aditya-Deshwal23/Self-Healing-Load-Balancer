@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import {
   AlertTriangle,
@@ -7,10 +8,12 @@ import {
   Check,
   CircleDashed,
   Clock3,
+  RotateCcw,
   ShieldCheck,
 } from "lucide-react";
 import { LiveRouteMatrix } from "@/features/traffic/live-matrix";
-import { useDecisionTrace, useOperationalSummary } from "@/lib/api/operations";
+import { TrafficHistoryCharts } from "@/features/overview/traffic-history-charts";
+import { useDecisionTrace, useOperationalSummary, useResetLab } from "@/lib/api/operations";
 import { useControlPlane } from "@/lib/use-control-plane";
 import {
   PageHeader,
@@ -38,8 +41,14 @@ function time(value: string | null | undefined) {
 }
 
 export function LiveCommandCenter() {
+  const [statsAccessIsLocal, setStatsAccessIsLocal] = useState<boolean | null>(null);
   const control = useControlPlane();
   const summary = useOperationalSummary();
+  const resetLab = useResetLab();
+  useEffect(() => {
+    const hostname = window.location.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+    setStatsAccessIsLocal(["localhost", "127.0.0.1", "::1"].includes(hostname));
+  }, []);
   const activeIncident = summary.data?.active_incidents[0];
   const trace = useDecisionTrace(activeIncident?.id);
 
@@ -66,6 +75,9 @@ export function LiveCommandCenter() {
   const recovery = trace.data?.recovery;
   const classification = trace.data?.classifications.at(-1);
   const healthy = !activeIncident;
+  const role = control.session?.scopes[0]?.role;
+  const canResetLab = ["RESEARCHER", "PROJECT_ADMIN", "SYSTEM_ADMIN"].includes(role ?? "");
+  const resetPending = resetLab.isPending || ["REQUESTED", "RUNNING"].includes(data.lab_reset?.status ?? "");
 
   return (
     <div className="live-command-center page-stack">
@@ -105,17 +117,76 @@ export function LiveCommandCenter() {
           </>
         }
         actions={
-          activeIncident ? (
-            <Link
-              className="button primary"
-              href={`/app/incidents?incident=${activeIncident.id}&trace=1`}
-            >
-              Decision Trace
-              <ArrowRight size={15} />
-            </Link>
-          ) : undefined
+          <>
+            {statsAccessIsLocal ? (
+              <a
+                className="button secondary"
+                href="http://127.0.0.1:8404/stats"
+                target="_blank"
+                rel="noreferrer"
+                title="Open HAProxy live statistics on this host."
+              >
+                HAProxy stats
+                <ArrowRight size={15} />
+              </a>
+            ) : (
+              <button
+                className="button secondary"
+                type="button"
+                disabled
+                title={statsAccessIsLocal === null
+                  ? "Checking whether this browser is on the control host."
+                  : "HAProxy stats are bound to 127.0.0.1 on the control host. Open this dashboard on that host to use the link."}
+              >
+                {statsAccessIsLocal === null ? "Checking HAProxy stats…" : "HAProxy stats · host-local"}
+              </button>
+            )}
+            {data.environment.kind === "LAB" && (
+              <button
+                className="button secondary"
+                type="button"
+                disabled={!canResetLab || resetPending || control.state !== "live"}
+                onClick={() => resetLab.mutate()}
+                title="Clear LAB faults and restore all healthy memberships to their registered baseline after direct probes pass."
+              >
+                <RotateCcw size={15} />
+                {resetPending ? "Resetting to baseline…" : "Reset to all green"}
+              </button>
+            )}
+            {activeIncident && (
+              <Link
+                className="button primary"
+                href={`/app/incidents?incident=${activeIncident.id}&trace=1`}
+              >
+                Decision Trace
+                <ArrowRight size={15} />
+              </Link>
+            )}
+          </>
         }
       />
+
+      {data.environment.kind === "LAB" && !canResetLab && (
+        <p className="microcopy">Reset is available to authorized LAB operator roles.</p>
+      )}
+      {resetLab.isError && (
+        <div className="notice warning" role="alert">
+          LAB reset could not be requested: {resetLab.error.message}
+        </div>
+      )}
+      {data.lab_reset?.status === "NEEDS_REVIEW" && (
+        <div className="notice warning" role="status">
+          <div>
+            LAB reset stopped at {String(data.lab_reset.result.phase ?? "a safety check")}.
+            Direct probes or HAProxy readback did not pass, so traffic was not
+            reported as restored. Fix the cause, then retry the reset.
+            <details>
+              <summary>Reset check details</summary>
+              <pre>{JSON.stringify(data.lab_reset.result, null, 2)}</pre>
+            </details>
+          </div>
+        </div>
+      )}
 
       <section className="operational-strip" aria-label="Live traffic status">
         <div className="operational-item neutral">
@@ -155,6 +226,8 @@ export function LiveCommandCenter() {
           </small>
         </div>
       </section>
+
+      <TrafficHistoryCharts />
 
       <div className="command-primary-grid">
         <section

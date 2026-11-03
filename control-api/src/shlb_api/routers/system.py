@@ -190,7 +190,7 @@ def system_capabilities(
                 "verification": True,
                 "reintegration": True,
             },
-            "failure_classes": ["HEALTHY", "INSTANCE_DOWN", "ROUTE_INSTANCE_FAILURE", "SHARED_ROUTE_FAILURE", "UNKNOWN"],
+            "failure_classes": ["HEALTHY", "INSTANCE_DOWN", "ROUTE_INSTANCE_FAILURE", "ROUTE_INSTANCE_DEGRADED", "SHARED_ROUTE_FAILURE", "UNKNOWN"],
             "contracts": {
                 "api": "v1",
                 "fingerprint": "fingerprint-v1",
@@ -208,7 +208,7 @@ def system_capabilities(
                 "worker_process": ["Prometheus query", "direct probes", "HAProxy Runtime readback", "predeclared Runtime mutation"],
             },
             "prototype_support": {
-                "implemented": ["HEALTHY", "INSTANCE_DOWN", "ROUTE_INSTANCE_FAILURE", "SHARED_ROUTE_FAILURE", "UNKNOWN"],
+                "implemented": ["HEALTHY", "INSTANCE_DOWN", "ROUTE_INSTANCE_FAILURE", "ROUTE_INSTANCE_DEGRADED", "SHARED_ROUTE_FAILURE", "UNKNOWN"],
                 "planned": ["INSTANCE_DEGRADED", "TRAFFIC_OVERLOAD", "VERSION_SPECIFIC_FAILURE", "ML classifier", "ELK", "local LLM"],
             },
         },

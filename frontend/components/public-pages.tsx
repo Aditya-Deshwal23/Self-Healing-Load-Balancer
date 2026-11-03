@@ -27,6 +27,7 @@ const implementedFailureClasses = [
   "HEALTHY",
   "INSTANCE_DOWN",
   "ROUTE_INSTANCE_FAILURE",
+  "ROUTE_INSTANCE_DEGRADED",
   "SHARED_ROUTE_FAILURE",
   "UNKNOWN",
 ];

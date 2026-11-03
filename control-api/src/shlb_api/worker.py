@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import socket
+import threading
 import time
 import uuid
 from datetime import datetime, timedelta
@@ -26,6 +27,7 @@ from shlb_api.models import (
     Fingerprint,
     Incident,
     LabFault,
+    LabResetRequest,
     ObservationWindow,
     ObservedStateSnapshot,
     Project,
@@ -57,6 +59,12 @@ if redis.call("get", KEYS[1]) == ARGV[1] then
 end
 return 0
 """
+RENEW_LEASE_SCRIPT = """
+if redis.call("get", KEYS[1]) == ARGV[1] then
+    return redis.call("expire", KEYS[1], ARGV[2])
+end
+return 0
+"""
 
 
 class ControlWorker:
@@ -79,21 +87,59 @@ class ControlWorker:
         # feeds HAProxy — and is what lets the benchmark data compare the shadow
         # signal's onset time against the deterministic rule engine's MTTD.
         self._fastpath_onset: dict[str, datetime] = {}
+        self._authority_stop = threading.Event()
+        self._authority_lost = threading.Event()
 
     def start(self) -> None:
         self._acquire_authority()
         self._acquire_lease()
         self._start_generation()
+        threading.Thread(
+            target=self._maintain_authority,
+            name="worker-authority-heartbeat",
+            daemon=True,
+        ).start()
         while True:
             started = time.monotonic()
             try:
-                if not self._refresh_lease():
+                if self._authority_lost.is_set() or not self._refresh_lease():
+                    self._authority_lost.set()
                     raise RuntimeError("worker coordination lease was lost")
                 self.tick()
             except Exception as exc:  # bounded loop survives dependency interruptions
                 print(json.dumps({"event": "worker_iteration_failed", "error_type": type(exc).__name__, "detail": str(exc)[:300]}, separators=(",", ":")), flush=True)
+                if self._authority_lost.is_set():
+                    raise SystemExit(1) from exc
             elapsed = time.monotonic() - started
             time.sleep(max(0.1, LAB_POLICY.loop_seconds - elapsed))
+
+    def _maintain_authority(self) -> None:
+        interval = max(1.0, min(3.0, LAB_POLICY.worker_lease_seconds / 3))
+        while not self._authority_stop.wait(interval):
+            try:
+                renewed = self.redis.eval(
+                    RENEW_LEASE_SCRIPT,
+                    1,
+                    WORKER_LEASE_KEY,
+                    self.worker_id,
+                    str(LAB_POLICY.worker_lease_seconds),
+                )
+                if not renewed:
+                    self._authority_lost.set()
+                    print(json.dumps({"event": "worker_coordination_lease_lost"}), flush=True)
+                    return
+                with self.sessions() as db:
+                    generation = db.get(ControllerGeneration, self.generation_id)
+                    if generation is None or generation.status != "ACTIVE":
+                        self._authority_lost.set()
+                        print(json.dumps({"event": "worker_generation_lost"}), flush=True)
+                        return
+                    generation.last_heartbeat_at = utc_now()
+                    db.commit()
+            except Exception as exc:
+                self._authority_lost.set()
+                print(json.dumps({"event": "worker_authority_heartbeat_failed", "error_type": type(exc).__name__, "detail": str(exc)[:300]}, separators=(",", ":")), flush=True)
+                return
 
     def _acquire_authority(self) -> None:
         self.lock_connection = get_engine().connect()
@@ -158,16 +204,22 @@ class ControlWorker:
                 .limit(1)
             )
             if generation is None:
-                return False
+                # start() holds the PostgreSQL advisory authority lock before
+                # examining Redis. No registered generation can therefore be
+                # an owner that is still allowed to mutate HAProxy.
+                return True
             return generation.status != "ACTIVE" or generation.last_heartbeat_at < utc_now() - timedelta(
                 seconds=LAB_POLICY.heartbeat_stale_seconds
             )
 
     def _refresh_lease(self) -> bool:
-        if self.redis.get(WORKER_LEASE_KEY) != self.worker_id:
-            return False
-        self.redis.expire(WORKER_LEASE_KEY, LAB_POLICY.worker_lease_seconds)
-        return True
+        return bool(self.redis.eval(
+            RENEW_LEASE_SCRIPT,
+            1,
+            WORKER_LEASE_KEY,
+            self.worker_id,
+            str(LAB_POLICY.worker_lease_seconds),
+        ))
 
     def tick(self) -> None:
         with self.sessions() as db:
@@ -178,10 +230,20 @@ class ControlWorker:
             db.commit()
 
         self.routes, self.instances = self._load_topology()
+        if self._process_lab_reset_commands():
+            return
         self._process_fault_commands()
         window, snapshot, evidence, probes, memberships, fast_recommendations = self._observe()
 
         with self.sessions() as db:
+            latest_reset = db.scalar(
+                select(LabResetRequest)
+                .where(LabResetRequest.environment_id == IDS["environment"])
+                .order_by(LabResetRequest.created_at.desc())
+                .limit(1)
+            )
+            if latest_reset and latest_reset.status == "NEEDS_REVIEW":
+                return
             unfinished = db.scalar(select(Action).where(Action.environment_id == IDS["environment"], Action.lifecycle.in_(["PREPARED", "APPLIED", "STATE_CONFIRMED"])).order_by(Action.created_at).limit(1))
             if unfinished:
                 self._recover_unfinished_action(db, unfinished)
@@ -189,6 +251,20 @@ class ControlWorker:
             action = db.scalar(select(Action).where(Action.environment_id == IDS["environment"], Action.lifecycle == "VERIFYING").order_by(Action.created_at).limit(1))
             if action:
                 self._verify_action(db, action, window, evidence, memberships)
+                return
+            unknown_instance_action = db.scalar(
+                select(Action)
+                .where(
+                    Action.environment_id == IDS["environment"],
+                    Action.lifecycle == "RESULT_UNKNOWN",
+                    Action.action_kind == "INSTANCE_QUARANTINE",
+                )
+                .order_by(Action.created_at)
+                .limit(1)
+            )
+            if unknown_instance_action:
+                if self._faults_are_clear(db):
+                    self._restore_instance_action(db, unknown_instance_action, probes)
                 return
             recovery = db.scalar(select(ReintegrationRun).where(ReintegrationRun.environment_id == IDS["environment"], ReintegrationRun.status.in_(["ACTIVE", "ROLLING_BACK"])).order_by(ReintegrationRun.created_at).limit(1))
             if recovery:
@@ -209,17 +285,111 @@ class ControlWorker:
             decision = classify(evidence, probes, conflicts, statistical_support=fast_recommendations, routes=self.routes, instances=self.instances)
             if decision.final_class == "HEALTHY":
                 if active_fault is None:
-                    self._resolve_non_action_incidents(db)
+                    if self._incident_signal_confirmed(db, window, decision):
+                        self._resolve_non_action_incidents(db)
                 return
             if decision.final_class == "UNKNOWN" and active_fault is None:
                 return
-            if decision.final_class == "UNKNOWN" and active_fault and active_fault.scenario != "UNKNOWN_CONFLICT" and active_fault.applied_at and (utc_now() - active_fault.applied_at).total_seconds() < 20:
+            if decision.final_class == "UNKNOWN" and active_fault and active_fault.scenario != "UNKNOWN_CONFLICT":
+                target_routes = [active_fault.target_route] if active_fault.target_route else list(self.routes)
+                target_instances = (
+                    list(self.instances)
+                    if active_fault.target_instance in (None, "all")
+                    else [active_fault.target_instance]
+                )
+                target_sample_counts = [
+                    evidence.get(f"{route}/{instance}", {}).get("samples", 0)
+                    for route in target_routes
+                    for instance in target_instances
+                ]
+                if not target_sample_counts or min(target_sample_counts) < LAB_POLICY.degraded_minimum_samples:
+                    return
+            needs_independent_confirmation = decision.final_class in {
+                "ROUTE_INSTANCE_DEGRADED",
+                "ROUTE_INSTANCE_FAILURE",
+                "SHARED_ROUTE_FAILURE",
+                "INSTANCE_DOWN",
+            } or (
+                decision.final_class == "UNKNOWN"
+                and active_fault is not None
+                and active_fault.scenario != "UNKNOWN_CONFLICT"
+            )
+            if needs_independent_confirmation and not self._incident_signal_confirmed(db, window, decision):
                 return
             incident, certificate = self._persist_decision(db, window, decision)
             if decision.final_class == "ROUTE_INSTANCE_FAILURE" and decision.actionable:
                 self._prepare_and_apply_route_action(db, incident, certificate, memberships)
             elif decision.final_class == "INSTANCE_DOWN" and decision.actionable:
                 self._prepare_and_apply_instance_action(db, incident, certificate, memberships)
+
+    def _incident_signal_confirmed(
+        self,
+        db: Session,
+        window: ObservationWindow,
+        decision: RuleDecision,
+    ) -> bool:
+        """Confirm an incident class in consecutive, independent windows."""
+        cursor = window
+        prior_windows: list[tuple[ObservationWindow, RuleDecision]] = []
+        for _ in range(max(0, LAB_POLICY.incident_confirmation_windows - 1)):
+            prior = db.scalar(
+                select(ObservationWindow)
+                .where(
+                    ObservationWindow.environment_id == window.environment_id,
+                    ObservationWindow.ended_at <= cursor.started_at,
+                )
+                .order_by(ObservationWindow.ended_at.desc())
+                .limit(1)
+            )
+            if prior is None:
+                return False
+            gap = cursor.started_at - prior.ended_at
+            if gap < timedelta(0) or gap > timedelta(seconds=LAB_POLICY.loop_seconds * 2):
+                return False
+            prior_decision = classify(
+                prior.metrics.get("memberships", {}),
+                prior.probes,
+                prior.conflicts,
+                routes=self.routes,
+                instances=self.instances,
+            )
+            if (
+                prior_decision.final_class != decision.final_class
+                or prior_decision.route != decision.route
+                or prior_decision.instance != decision.instance
+                or (
+                    decision.final_class == "UNKNOWN"
+                    and prior_decision.support.get("reason") != decision.support.get("reason")
+                )
+            ):
+                return False
+            prior_windows.append((prior, prior_decision))
+            cursor = prior
+        decision.support["confirmation"] = {
+            "required_windows": LAB_POLICY.incident_confirmation_windows,
+            "windows": [
+                {
+                    "window_id": str(prior.id),
+                    "started_at": prior.started_at.isoformat(),
+                    "ended_at": prior.ended_at.isoformat(),
+                    "final_class": prior_decision.final_class,
+                    "route": prior_decision.route,
+                    "instance": prior_decision.instance,
+                    "metrics": prior.metrics,
+                    "probes": prior.probes,
+                    "conflicts": prior.conflicts,
+                }
+                for prior, prior_decision in reversed(prior_windows)
+            ] + [{
+                "window_id": str(window.id),
+                "started_at": window.started_at.isoformat(),
+                "ended_at": window.ended_at.isoformat(),
+                "final_class": decision.final_class,
+                "route": decision.route,
+                "instance": decision.instance,
+            }],
+        }
+        return True
 
     def _load_topology(self) -> tuple[tuple[str, ...], tuple[str, ...]]:
         with self.sessions() as db:
@@ -314,12 +484,196 @@ class ControlWorker:
                         fault.version += 1
                         self._event(db, event_type="lab_fault_cleared", aggregate_type="lab_fault", aggregate_id=fault.id, aggregate_version=fault.version, data={"status": fault.status, "ground_truth_id": fault.ground_truth_id})
                 except Exception as exc:
+                    cleanup_errors = []
+                    for instance in targets:
+                        try:
+                            self.probes.clear_fault(instance)
+                        except Exception as cleanup_exc:
+                            cleanup_errors.append(type(cleanup_exc).__name__)
                     fault.status = "FAILED"
                     fault.cleared_at = now
                     fault.version += 1
-                    self._event(db, event_type="lab_fault_failed", aggregate_type="lab_fault", aggregate_id=fault.id, aggregate_version=fault.version, data={"error_type": type(exc).__name__})
+                    self._event(db, event_type="lab_fault_failed", aggregate_type="lab_fault", aggregate_id=fault.id, aggregate_version=fault.version, data={"error_type": type(exc).__name__, "cleanup_error_types": cleanup_errors})
             if faults:
                 self._commit_publish(db)
+
+    def _process_lab_reset_commands(self) -> bool:
+        """Restore the synthetic LAB to its registered baseline on operator request."""
+        with self.sessions() as db:
+            reset = db.scalar(
+                select(LabResetRequest)
+                .where(
+                    LabResetRequest.environment_id == IDS["environment"],
+                    LabResetRequest.status.in_(["REQUESTED", "RUNNING"]),
+                )
+                .order_by(LabResetRequest.created_at)
+                .with_for_update(skip_locked=True)
+                .limit(1)
+            )
+            if reset is None:
+                return False
+
+            reset.status = "RUNNING"
+            reset.version += 1
+            reset.result = {"phase": "clearing_lab_faults"}
+            self._event(db, event_type="lab_reset_started", aggregate_type="lab_reset", aggregate_id=reset.id, aggregate_version=reset.version, data=reset.result)
+            self._commit_publish(db)
+
+            clear_errors = []
+            for instance in self.instances:
+                try:
+                    self.probes.clear_fault(instance)
+                except Exception as exc:
+                    clear_errors.append({"instance": instance, "error": type(exc).__name__})
+            if clear_errors:
+                reset.status = "NEEDS_REVIEW"
+                reset.completed_at = utc_now()
+                reset.result = {"phase": "clearing_lab_faults", "clear_errors": clear_errors}
+                reset.version += 1
+                self._event(db, event_type="lab_reset_needs_review", aggregate_type="lab_reset", aggregate_id=reset.id, aggregate_version=reset.version, data=reset.result)
+                self._commit_publish(db)
+                return True
+
+            now = utc_now()
+            faults = db.scalars(
+                select(LabFault).where(
+                    LabFault.environment_id == IDS["environment"],
+                    LabFault.status.not_in(TERMINAL_FAULTS),
+                )
+            ).all()
+            for fault in faults:
+                fault.status = "CLEARED"
+                fault.cleared_at = now
+                fault.version += 1
+
+            probes = self.probes.probes()
+            failed_probes = {
+                key: probe
+                for key, probe in probes.items()
+                if probe.get("application_ok") is not True
+            }
+            if failed_probes:
+                reset.status = "NEEDS_REVIEW"
+                reset.completed_at = now
+                reset.result = {"phase": "health_gate", "failed_probes": failed_probes}
+                reset.version += 1
+                self._event(db, event_type="lab_reset_needs_review", aggregate_type="lab_reset", aggregate_id=reset.id, aggregate_version=reset.version, data=reset.result)
+                self._commit_publish(db)
+                return True
+
+            rows = db.execute(
+                select(RouteMembership, RouteGroup, BackendInstance, DesiredRouteState)
+                .join(RouteGroup, RouteGroup.id == RouteMembership.route_id)
+                .join(Service, Service.id == RouteGroup.service_id)
+                .join(BackendInstance, BackendInstance.id == RouteMembership.instance_id)
+                .outerjoin(DesiredRouteState, DesiredRouteState.membership_id == RouteMembership.id)
+                .where(Service.environment_id == IDS["environment"])
+                .order_by(RouteGroup.priority, BackendInstance.stable_name)
+            ).all()
+            if len(rows) != len(self.routes) * len(self.instances) or any(desired is None for _, _, _, desired in rows):
+                reset.status = "NEEDS_REVIEW"
+                reset.completed_at = now
+                reset.result = {"phase": "topology_gate", "expected_memberships": len(self.routes) * len(self.instances), "found_memberships": len(rows)}
+                reset.version += 1
+                self._event(db, event_type="lab_reset_needs_review", aggregate_type="lab_reset", aggregate_id=reset.id, aggregate_version=reset.version, data=reset.result)
+                self._commit_publish(db)
+                return True
+
+            baseline = []
+            for membership, route, instance, desired in rows:
+                desired.admin_state = "ready" if membership.baseline_weight > 0 else "drain"
+                desired.weight = membership.baseline_weight
+                desired.controller_generation = self.generation
+                desired.source_action_id = None
+                desired.version += 1
+                baseline.append({
+                    "backend": membership.haproxy_backend,
+                    "server": membership.haproxy_server,
+                    "admin_state": desired.admin_state,
+                    "weight": desired.weight,
+                    "route": route.route_key,
+                    "instance": instance.stable_name,
+                })
+            reset.result = {"phase": "restoring_baseline", "membership_count": len(baseline)}
+            reset.version += 1
+            db.commit()
+
+            readbacks = []
+            runtime_errors = []
+            for target in baseline:
+                try:
+                    observed = self.runtime.set_absolute(
+                        target["backend"],
+                        target["server"],
+                        admin_state=target["admin_state"],
+                        weight=target["weight"],
+                    )["observed"]
+                    readbacks.append({**target, "observed": observed})
+                    if observed.get("admin_state") != target["admin_state"] or observed.get("weight") != target["weight"]:
+                        runtime_errors.append({"target": target, "observed": observed})
+                except Exception as exc:
+                    runtime_errors.append({"target": target, "error": type(exc).__name__})
+
+            now = utc_now()
+            if runtime_errors:
+                reset.status = "NEEDS_REVIEW"
+                reset.completed_at = now
+                reset.result = {"phase": "runtime_readback", "restored": readbacks, "errors": runtime_errors}
+                reset.version += 1
+                unfinished_actions = db.scalars(
+                    select(Action).where(
+                        Action.environment_id == IDS["environment"],
+                        Action.lifecycle.in_(["PREPARED", "APPLIED", "STATE_CONFIRMED", "VERIFYING"]),
+                    )
+                ).all()
+                for action in unfinished_actions:
+                    action.lifecycle = "NEEDS_REVIEW"
+                    action.terminal_at = now
+                    action.version += 1
+                for run in db.scalars(select(ReintegrationRun).where(ReintegrationRun.environment_id == IDS["environment"], ReintegrationRun.status.in_(["ACTIVE", "ROLLING_BACK"]))).all():
+                    run.status = "NEEDS_REVIEW"
+                    run.current_stage = "NEEDS_REVIEW"
+                    run.completed_at = now
+                    run.next_transition_at = None
+                    run.version += 1
+                self._event(db, event_type="lab_reset_needs_review", aggregate_type="lab_reset", aggregate_id=reset.id, aggregate_version=reset.version, data=reset.result)
+                self._commit_publish(db)
+                return True
+
+            unfinished_actions = db.scalars(
+                select(Action).where(
+                    Action.environment_id == IDS["environment"],
+                    Action.lifecycle.in_(["PREPARED", "APPLIED", "STATE_CONFIRMED", "VERIFYING"]),
+                )
+            ).all()
+            for action in unfinished_actions:
+                action.lifecycle = "ROLLED_BACK"
+                action.terminal_at = now
+                action.version += 1
+            for run in db.scalars(select(ReintegrationRun).where(ReintegrationRun.environment_id == IDS["environment"], ReintegrationRun.status.in_(["ACTIVE", "ROLLING_BACK", "NEEDS_REVIEW"]))).all():
+                run.status = "CANCELLED"
+                run.current_stage = "CANCELLED"
+                run.completed_at = now
+                run.next_transition_at = None
+                run.version += 1
+                for stage in db.scalars(select(ReintegrationStage).where(ReintegrationStage.run_id == run.id, ReintegrationStage.status.in_(["PENDING", "CURRENT"]))).all():
+                    stage.status = "CANCELLED"
+                    stage.result = {**stage.result, "cancelled_by": "LAB_BASELINE_RESET"}
+            for incident in db.scalars(select(Incident).where(Incident.environment_id == IDS["environment"], Incident.status.in_(ACTIVE_INCIDENTS))).all():
+                incident.status = "RESOLVED"
+                incident.resolved_at = now
+                incident.last_observed_at = now
+                incident.version += 1
+                self._event(db, event_type="incident_resolved", aggregate_type="incident", aggregate_id=incident.id, aggregate_version=incident.version, incident_id=incident.id, data={"resolution": "operator requested verified LAB baseline reset", "reset_request_id": str(reset.id)})
+
+            reset.status = "COMPLETED"
+            reset.completed_at = now
+            reset.result = {"phase": "complete", "restored_memberships": len(readbacks), "readback_confirmed": True, "cleared_faults": len(faults)}
+            reset.version += 1
+            self.fastpath = FastPathController()
+            self._event(db, event_type="lab_reset_completed", aggregate_type="lab_reset", aggregate_id=reset.id, aggregate_version=reset.version, data=reset.result)
+            self._commit_publish(db)
+            return True
 
     def _observe(self) -> tuple[ObservationWindow, ObservedStateSnapshot, dict, dict, list[dict], dict]:
         evidence = self.prometheus.collect(f"{LAB_POLICY.observation_window_seconds}s")
@@ -393,6 +747,7 @@ class ControlWorker:
         return window, snapshot, evidence, probes, memberships, fast_recommendations
 
     def _persist_decision(self, db: Session, window: ObservationWindow, decision: RuleDecision) -> tuple[Incident, EvidenceCertificate]:
+        window.conflicts = decision.support.get("conflicts", [])
         route_id = db.scalar(
             select(RouteGroup.id)
             .join(Service, RouteGroup.service_id == Service.id)
@@ -406,29 +761,82 @@ class ControlWorker:
         canonical = f"class={decision.final_class}|route={decision.route or '-'}|instance={decision.instance or '-'}|schema=fingerprint-v1"
         fingerprint_hash = hashlib.sha256(canonical.encode()).hexdigest()
         incident = db.scalar(select(Incident).where(Incident.environment_id == IDS["environment"], Incident.fingerprint_hash == fingerprint_hash, Incident.status.in_(ACTIVE_INCIDENTS)).order_by(Incident.opened_at.desc()).limit(1))
-        if incident:
-            certificate = db.scalar(select(EvidenceCertificate).where(EvidenceCertificate.incident_id == incident.id).order_by(EvidenceCertificate.created_at.desc()).limit(1))
-            if certificate is None:
-                raise RuntimeError("active incident is missing its evidence certificate")
-            return incident, certificate
+        route_instance_classes = {"ROUTE_INSTANCE_DEGRADED", "ROUTE_INSTANCE_FAILURE"}
+        if (
+            incident is None
+            and decision.final_class in route_instance_classes
+            and route_id is not None
+            and instance_id is not None
+        ):
+            incident = db.scalar(
+                select(Incident)
+                .where(
+                    Incident.environment_id == IDS["environment"],
+                    Incident.route_id == route_id,
+                    Incident.instance_id == instance_id,
+                    Incident.operational_class.in_(route_instance_classes),
+                    Incident.status.in_(ACTIVE_INCIDENTS),
+                )
+                .order_by(Incident.opened_at.desc())
+                .limit(1)
+            )
         now = utc_now()
         summary_map = {
             "ROUTE_INSTANCE_FAILURE": f"{decision.route} fails only on {decision.instance} while peers and sibling routes remain healthy.",
-            "SHARED_ROUTE_FAILURE": "Checkout fails across all physical instances; mass ejection is prohibited.",
+            "ROUTE_INSTANCE_DEGRADED": f"{decision.route} on {decision.instance} has elevated 5xx responses or a failing endpoint probe; evidence is not strong enough to quarantine it.",
+            "SHARED_ROUTE_FAILURE": f"{decision.route} fails across all physical instances; mass ejection is prohibited.",
             "INSTANCE_DOWN": f"All registered routes on {decision.instance} fail direct application probes.",
             "UNKNOWN": "Evidence is conflicting or incomplete; destructive action is prohibited.",
         }
-        incident = Incident(environment_id=IDS["environment"], route_id=route_id, instance_id=instance_id, status="NEEDS_REVIEW" if decision.final_class == "UNKNOWN" else "OPEN", severity="CRITICAL" if decision.final_class in {"INSTANCE_DOWN", "SHARED_ROUTE_FAILURE"} else "WARNING", operational_class=decision.final_class, fingerprint_hash=fingerprint_hash, summary=summary_map[decision.final_class], opened_at=now, last_observed_at=now)
-        db.add(incident)
-        db.flush()
+        is_new_incident = incident is None
+        if incident is None:
+            incident = Incident(environment_id=IDS["environment"], route_id=route_id, instance_id=instance_id, status="NEEDS_REVIEW" if decision.final_class == "UNKNOWN" else "OPEN", severity="CRITICAL" if decision.final_class in {"INSTANCE_DOWN", "SHARED_ROUTE_FAILURE"} else "WARNING", operational_class=decision.final_class, fingerprint_hash=fingerprint_hash, summary=summary_map[decision.final_class], opened_at=now, last_observed_at=now)
+            db.add(incident)
+            db.flush()
+            revision = 1
+        else:
+            certificate = db.scalar(
+                select(EvidenceCertificate)
+                .where(EvidenceCertificate.incident_id == incident.id)
+                .order_by(EvidenceCertificate.created_at.desc())
+                .limit(1)
+            )
+            if certificate is None:
+                raise RuntimeError("active incident is missing its evidence certificate")
+            latest_window = db.get(ObservationWindow, certificate.observation_window_id)
+            latest_classification = db.scalar(
+                select(Classification)
+                .where(Classification.incident_id == incident.id)
+                .order_by(Classification.revision.desc())
+                .limit(1)
+            )
+            if latest_window is None or latest_classification is None:
+                raise RuntimeError("active incident is missing its classification history")
+            if window.started_at < latest_window.ended_at:
+                return incident, certificate
+            revision = latest_classification.revision + 1
+            if incident.operational_class != decision.final_class:
+                incident.operational_class = decision.final_class
+                incident.route_id = route_id
+                incident.instance_id = instance_id
+                incident.summary = summary_map[decision.final_class]
+                incident.severity = "CRITICAL" if decision.final_class in {"INSTANCE_DOWN", "SHARED_ROUTE_FAILURE"} else "WARNING"
+                incident.fingerprint_hash = fingerprint_hash
+            incident.last_observed_at = now
+            incident.version += 1
         fingerprint = Fingerprint(incident_id=incident.id, schema_version="fingerprint-v1", canonical_value=canonical, fingerprint_hash=fingerprint_hash)
         db.add(fingerprint)
         db.flush()
-        classification = Classification(incident_id=incident.id, observation_window_id=window.id, revision=1, final_class=decision.final_class, confidence=decision.confidence, completeness=decision.completeness, evidence_support=decision.support, competing_hypotheses=decision.competing)
+        classification = Classification(incident_id=incident.id, observation_window_id=window.id, revision=revision, final_class=decision.final_class, confidence=decision.confidence, completeness=decision.completeness, evidence_support=decision.support, competing_hypotheses=decision.competing)
         db.add(classification)
         db.flush()
         safety = {"evaluated": False, "reason": "class is not actionable"}
-        candidates = [{"unit": "NO_ACTION", "result": "selected", "reason": "UNKNOWN/shared scope cannot actuate"}]
+        no_action_reason = {
+            "ROUTE_INSTANCE_DEGRADED": "Elevated 5xx or a failing probe was recorded, but isolation proof is insufficient to drain this route/backend safely.",
+            "SHARED_ROUTE_FAILURE": "All route peers show a shared failure; mass ejection is unsafe, so retain traffic and require operator review.",
+            "UNKNOWN": "Evidence is conflicting or incomplete; do not mutate HAProxy.",
+        }.get(decision.final_class, "Class is non-actionable under the current safety policy.")
+        candidates = [{"unit": "NO_ACTION", "result": "selected", "reason": no_action_reason}]
         if decision.final_class == "ROUTE_INSTANCE_FAILURE":
             queues = {item["server"].removeprefix("srv_").replace("_", "-"): item["queue"] for item in self.runtime.memberships() if item["backend"] == f"be_{decision.route}"}
             safety = route_instance_capacity(capacities={key: 100 for key in self.instances}, target_instance=decision.instance, queues=queues, minimum_reserve_percent=LAB_POLICY.minimum_physical_reserve_percent)
@@ -461,7 +869,8 @@ class ControlWorker:
         certificate = EvidenceCertificate(incident_id=incident.id, observation_window_id=window.id, fingerprint_id=fingerprint.id, classification_id=classification.id, certificate_hash=canonical_hash(certificate_payload), scope_evidence=decision.support, safety_inputs=safety, candidate_actions=candidates)
         db.add(certificate)
         db.flush()
-        self._event(db, event_type="incident_detected", aggregate_type="incident", aggregate_id=incident.id, aggregate_version=incident.version, incident_id=incident.id, data={"classification": incident.operational_class, "summary": incident.summary})
+        if is_new_incident:
+            self._event(db, event_type="incident_detected", aggregate_type="incident", aggregate_id=incident.id, aggregate_version=incident.version, incident_id=incident.id, data={"classification": incident.operational_class, "summary": incident.summary})
         self._event(db, event_type="classification_completed", aggregate_type="classification", aggregate_id=classification.id, aggregate_version=classification.revision, incident_id=incident.id, data={"final_class": decision.final_class, "confidence": decision.confidence, "completeness": decision.completeness, "actionable": decision.actionable})
         self._commit_publish(db)
         return incident, certificate
@@ -860,10 +1269,27 @@ class ControlWorker:
         incident = db.get(Incident, action.incident_id)
         if confirmed:
             attempt.status = "CONFIRMED"
+            action.lifecycle = "COMMITTED"
+            action.terminal_at = utc_now()
+            action.version += 1
             incident.status = "RESOLVED"
             incident.resolved_at = utc_now()
             incident.last_observed_at = incident.resolved_at
             incident.version += 1
+            revision = (db.scalar(select(func.max(VerificationResult.revision)).where(VerificationResult.action_id == action.id)) or 0) + 1
+            verification = VerificationResult(
+                action_id=action.id,
+                revision=revision,
+                result="EFFECTIVE",
+                affected_obligation={"recovery_probe_passes": passes, "required": LAB_POLICY.instance_recovery_probe_passes, "all_target_instance_routes_healthy": probe_ok},
+                preservation_obligation={"all_original_instance_memberships_restored": True, "runtime_readback_confirmed": True},
+                sample_count=passes,
+                started_at=action.created_at,
+                completed_at=utc_now(),
+            )
+            db.add(verification)
+            db.flush()
+            self._event(db, event_type="verification_updated", aggregate_type="verification", aggregate_id=verification.id, aggregate_version=revision, incident_id=incident.id, action_id=action.id, data={"result": verification.result, "recovery_probe_passes": passes, "restored_targets": list(targets)})
             self._event(db, event_type="incident_resolved", aggregate_type="incident", aggregate_id=incident.id, aggregate_version=incident.version, incident_id=incident.id, action_id=action.id, data={"resolution": "instance probe gate and Runtime restore confirmed", "restored_targets": list(targets)})
         else:
             attempt.status = "RESULT_UNKNOWN"

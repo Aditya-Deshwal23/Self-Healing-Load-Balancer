@@ -17,6 +17,9 @@ class LabControlPolicy:
     heartbeat_stale_seconds: int = 10
     failure_rate: float = 0.5
     healthy_rate: float = 0.1
+    degraded_minimum_samples: int = 6
+    degraded_minimum_errors: int = 2
+    incident_confirmation_windows: int = 2
     harmful_error_rate: float = 0.25
     target_minimum_samples: int = 6
     control_minimum_samples: int = 3
@@ -162,6 +165,39 @@ def classify(
                         {"class": "SHARED_ROUTE_FAILURE", "rejected": f"{route} peers on other instances are healthy"},
                     ],
                     True,
+                )
+
+    # Mark sustained, above-baseline 5xx even when probes still answer. This
+    # is a non-actuating warning: request errors can precede a hard failure,
+    # but probe/peer disagreement is not enough to drain production traffic.
+    for route in routes:
+        for instance in instances:
+            target = _member(evidence, route, instance)
+            target_probe = probes.get(f"{route}/{instance}", {})
+            elevated_error_rate = (
+                target.get("samples", 0) >= LAB_POLICY.degraded_minimum_samples
+                and target.get("errors", 0) >= LAB_POLICY.degraded_minimum_errors
+                and target.get("error_rate") is not None
+                and target["error_rate"] > HEALTHY_RATE
+            )
+            probe_failure = (
+                target.get("samples", 0) >= LAB_POLICY.degraded_minimum_samples
+                and target_probe.get("application_ok") is False
+            )
+            if elevated_error_rate or probe_failure:
+                return RuleDecision(
+                    "ROUTE_INSTANCE_DEGRADED", route, instance, 0.75, completeness,
+                    {
+                        "target": target,
+                        "direct_probe": target_probe,
+                        "same_route_peers": {peer: _member(evidence, route, peer) for peer in instances if peer != instance},
+                        "same_instance_other_routes": {sibling: _member(evidence, sibling, instance) for sibling in routes if sibling != route},
+                        "reason": "elevated 5xx or failing endpoint probe without complete isolation proof",
+                        "automatic_action": False,
+                        "shadow_statistical_signal": statistical_support,
+                    },
+                    [{"class": "ROUTE_INSTANCE_FAILURE", "rejected": "isolation threshold and peer/probe proof not met"}],
+                    False,
                 )
 
     # 4. HEALTHY: every cell in the topology is within bound and reachable.

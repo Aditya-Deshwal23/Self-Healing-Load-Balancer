@@ -5,10 +5,13 @@ import {
   Check,
   CircleDashed,
   ExternalLink,
+  FileDown,
   ShieldCheck,
   XCircle,
 } from "lucide-react";
-import { useDecisionTrace, useIncidents } from "@/lib/api/operations";
+import { useDecisionTrace, useIncidents, useRecovery } from "@/lib/api/operations";
+import { buildIncidentAnalysisReport } from "@/lib/reports/incident-analysis-report";
+import { downloadTextFile } from "@/lib/client-download";
 import {
   KeyValueGrid,
   PageHeader,
@@ -48,6 +51,10 @@ export function LiveIncidents({
   const list = useIncidents();
   const selectedId = incidentId ?? list.data?.items[0]?.id;
   const trace = useDecisionTrace(selectedId);
+  const recoveryDetail = useRecovery(trace.data?.recovery?.id);
+  const activeCount = (list.data?.items ?? []).filter((item) =>
+    ["OPEN", "MITIGATING", "VERIFYING", "RECOVERING", "NEEDS_REVIEW"].includes(item.status),
+  ).length;
 
   if (list.isLoading)
     return (
@@ -90,13 +97,46 @@ export function LiveIncidents({
       return (
         <StateMessage state="failure" title="Decision Trace unavailable.">
           The selected durable incident could not be loaded.
+          {trace.error instanceof Error ? ` API error: ${trace.error.message}` : ""}
         </StateMessage>
       );
     const data = trace.data;
     const classification = data.classifications.at(-1);
+    const metricSnapshot = data.evidence?.metrics as {
+      memberships?: Record<string, { samples?: number; errors?: number; error_rate?: number | null; status_codes?: Record<string, number>; p95_ms?: number | null }>;
+    } | undefined;
+    const membershipEvidence = metricSnapshot?.memberships ?? {};
+    const probeSnapshot = data.evidence?.probes as Record<string, { reachable?: boolean; application_ok?: boolean; status?: number | null }> | undefined;
+    const targetRoute = data.incident.target.route;
+    const targetInstance = data.incident.target.instance;
+    const targetKey = targetRoute && targetInstance ? `${targetRoute}/${targetInstance}` : null;
+    const targetEvidence = targetKey ? membershipEvidence[targetKey] : undefined;
+    const targetProbe = targetKey ? probeSnapshot?.[targetKey] : undefined;
+    const classExplanation: Record<string, string> = {
+      UNKNOWN: "The evidence is incomplete or conflicting. The controller retains the last confirmed routing state and cannot make a destructive change.",
+      ROUTE_INSTANCE_DEGRADED: "This route/backend pair showed elevated 5xx responses or a failed direct probe in separate evidence windows, but the evidence does not prove that isolating this one membership is safe.",
+      ROUTE_INSTANCE_FAILURE: "Evidence isolates the failure to one route on one backend. The controller can consider changing that exact pool membership while checking that peers remain safe.",
+      INSTANCE_DOWN: "Direct probes failed across every registered route on this physical instance. The controller scopes the response to this instance’s route memberships and checks capacity once.",
+      SHARED_ROUTE_FAILURE: "The same route is failing across physical instances. The evidence does not support ejecting one backend as the cause, so broad removal is prohibited.",
+      HEALTHY: "The latest evidence is within bounds and does not support an intervention.",
+    };
+    const targetErrorPercent = targetEvidence?.error_rate == null ? null : targetEvidence.error_rate * 100;
+    const noActionCandidate = data.certificate?.candidate_actions.find((item) => item.unit === "NO_ACTION");
     const candidate = data.certificate?.candidate_actions ?? [];
     const confirmed = data.action?.attempts?.some((item) =>
       ["CONFIRMED", "ACKNOWLEDGEMENT_LOST_CONFIRMED"].includes(item.status),
+    );
+    const instanceRecoveryComplete =
+      data.action?.kind === "INSTANCE_QUARANTINE" &&
+      data.verification?.result === "EFFECTIVE" &&
+      data.action.attempts.some(
+        (item) =>
+          item.operation === "restore_instance_after_probe_gate" &&
+          item.status === "CONFIRMED",
+      );
+    const report = buildIncidentAnalysisReport(
+      data,
+      recoveryDetail.data ?? null,
     );
     const stages = [
       {
@@ -139,10 +179,14 @@ export function LiveIncidents({
       },
       {
         name: "Recovery",
-        ready: data.recovery?.status === "COMPLETED",
+        ready: data.recovery?.status === "COMPLETED" || instanceRecoveryComplete,
         summary: data.recovery
           ? `${data.recovery.current_stage} · ${data.recovery.status}`
-          : "Not started",
+          : instanceRecoveryComplete
+            ? "3 all-route probes passed · baseline restored · readback confirmed"
+            : data.action?.kind === "INSTANCE_QUARANTINE"
+              ? "Waiting for 3 consecutive healthy all-route probes"
+              : "Not started",
       },
     ];
     return (
@@ -162,14 +206,41 @@ export function LiveIncidents({
               <StatusTag tone={tone(data.incident.status)}>
                 {data.incident.status}
               </StatusTag>
+              <span>
+                {data.incident.target.route
+                  ? `GET /${data.incident.target.route}`
+                  : "All registered routes"}
+                {data.incident.target.instance
+                  ? ` × ${data.incident.target.instance}`
+                  : " × all instances"}
+              </span>
               <code>{short(data.incident.id)}</code>
               <span>{new Date(data.incident.opened_at).toLocaleString()}</span>
             </>
           }
           actions={
-            <Link className="button secondary" href="/app/incidents">
-              All incidents
-            </Link>
+            <>
+              <button
+                className="button primary"
+                type="button"
+                disabled={Boolean(data.recovery && recoveryDetail.isLoading)}
+                onClick={() =>
+                  downloadTextFile(
+                    report.filename,
+                    report.content,
+                    "text/markdown;charset=utf-8",
+                  )
+                }
+              >
+                <FileDown size={15} />
+                {data.recovery && recoveryDetail.isLoading
+                  ? "Loading recovery details…"
+                  : "Download analysis report"}
+              </button>
+              <Link className="button secondary" href="/app/incidents">
+                All incidents
+              </Link>
+            </>
           }
         />
         <ol className="trace-spine" aria-label="Evidence to recovery workflow">
@@ -183,6 +254,34 @@ export function LiveIncidents({
             </li>
           ))}
         </ol>
+        <section className="decision-reading" aria-labelledby="decision-reading-title">
+          <header>
+            <span className="section-kicker">Plain-language decision</span>
+            <h2 id="decision-reading-title">What the controller concluded</h2>
+            <p>{classExplanation[classification?.final_class ?? "UNKNOWN"]}</p>
+          </header>
+          <div className="decision-reading-grid">
+            <article>
+              <span>Request evidence</span>
+              <strong>{targetEvidence ? `${targetEvidence.errors ?? 0} errors / ${targetEvidence.samples ?? 0} requests` : "No single target membership"}</strong>
+              <small>{targetErrorPercent === null ? "No target-specific error rate" : `${targetErrorPercent.toFixed(1)}% 5xx · p95 ${targetEvidence?.p95_ms?.toFixed(1) ?? "—"} ms`}</small>
+            </article>
+            <article>
+              <span>Independent probe</span>
+              <strong>{targetProbe ? targetProbe.application_ok ? "Passed" : "Failed" : "Not scoped"}</strong>
+              <small>{targetProbe ? `${targetProbe.reachable ? "Reachable" : "Unreachable"}${targetProbe.status ? ` · HTTP ${targetProbe.status}` : ""}` : "Classification applies to multiple cells or probe evidence is unavailable."}</small>
+            </article>
+            <article>
+              <span>Routing outcome</span>
+              <strong>{data.action ? `${data.action.lifecycle} · ${data.action.target.backend}/${data.action.target.server}` : "No HAProxy change"}</strong>
+              <small>{data.action ? String(data.action.expected_effect) : String(noActionCandidate?.reason ?? "No action was permitted for this classification.")}</small>
+            </article>
+          </div>
+          <details>
+            <summary>How to read the thresholds and scope checks</summary>
+            <p>Request errors are counted per route × instance membership. A confirmed incident needs the same classification in two separate, non-overlapping evidence windows. Elevated errors above 10% need at least 6 requests and 2 errors in each window; a failed direct probe can also support a warning after 6 request samples. Non-action incidents close only after two separate healthy windows. A route-only isolation decision needs at least 50% errors and 6 target samples, a failed target probe, healthy same-route peers, and healthy sibling routes on the same instance. Capacity and peer-queue checks run before any Runtime mutation. A physical instance shared by several pools is counted once for capacity, while each HAProxy membership remains independently changeable.</p>
+          </details>
+        </section>
         <div className="trace-grid">
           <Panel
             title="Evidence supports"
@@ -225,6 +324,63 @@ export function LiveIncidents({
                     })}
                   </pre>
                 </details>
+                <section className="evidence-revision-history" aria-label="Classification evidence history">
+                  <h3>Opening and later evidence</h3>
+                  <p>Each revision links to its own evidence window and includes the earlier independent window used to confirm it. Revision 1 is the opening record; later revisions show how the controller’s view changed over time.</p>
+                  <ol>
+                    {data.classifications.map((item) => {
+                      const evidenceWindow = item.evidence_window;
+                      const revisionMetrics = evidenceWindow?.metrics as {
+                        memberships?: Record<string, {
+                          samples?: number;
+                          errors?: number;
+                          error_rate?: number | null;
+                          p95_ms?: number | null;
+                        }>;
+                      } | undefined;
+                      const revisionProbes = evidenceWindow?.probes as Record<string, {
+                        reachable?: boolean;
+                        application_ok?: boolean;
+                        status?: number | null;
+                      }> | undefined;
+                      const revisionTarget = targetKey
+                        ? revisionMetrics?.memberships?.[targetKey]
+                        : undefined;
+                      const revisionProbe = targetKey
+                        ? revisionProbes?.[targetKey]
+                        : undefined;
+                      return (
+                        <li key={item.id}>
+                          <div className="evidence-revision-heading">
+                            <strong>Revision {item.revision} · {item.final_class.replaceAll("_", " ")}</strong>
+                            <span>{evidenceWindow ? `${new Date(evidenceWindow.started_at).toLocaleTimeString()}–${new Date(evidenceWindow.ended_at).toLocaleTimeString()}` : "Evidence window unavailable"}</span>
+                          </div>
+                          <p>
+                            {revisionTarget
+                              ? `${revisionTarget.errors ?? 0} errors in ${revisionTarget.samples ?? 0} requests · ${revisionTarget.error_rate == null ? "rate unavailable" : `${(revisionTarget.error_rate * 100).toFixed(1)}% 5xx`} · p95 ${revisionTarget.p95_ms?.toFixed(1) ?? "—"} ms`
+                              : "This classification covers a wider scope or has no single route × instance target."}
+                            {revisionProbe
+                              ? ` · probe ${revisionProbe.application_ok ? "passed" : "failed"}${revisionProbe.status ? ` (HTTP ${revisionProbe.status})` : ""}`
+                              : ""}
+                          </p>
+                          {evidenceWindow && (
+                            <details>
+                              <summary>Inspect revision {item.revision} details</summary>
+                              <pre>{formatJson({
+                                completeness: evidenceWindow.completeness,
+                                metrics: evidenceWindow.metrics,
+                                probes: evidenceWindow.probes,
+                                conflicts: evidenceWindow.conflicts,
+                                supports: item.evidence_support,
+                                rejected_scopes: item.competing_hypotheses,
+                              })}</pre>
+                            </details>
+                          )}
+                        </li>
+                      );
+                    })}
+                  </ol>
+                </section>
               </>
             ) : (
               <StateMessage state="unknown" title="No complete evidence window">
@@ -316,6 +472,42 @@ export function LiveIncidents({
             )}
           </Panel>
         </div>
+        <Panel title="Endpoint and code context" kicker="Synthetic LAB handler">
+          <KeyValueGrid
+            items={[
+              {
+                label: "Endpoint",
+                value: data.incident.target.route
+                  ? `GET /${data.incident.target.route}`
+                  : "GET /public, /auth, /catalog, /checkout",
+                mono: true,
+              },
+              {
+                label: "Backend instance",
+                value: data.incident.target.instance ?? "All registered instances",
+                mono: true,
+              },
+              { label: "Source file", value: "demo-backend/app.py · DemoHandler._serve" },
+              {
+                label: "Current LAB fault",
+                value: data.lab_fault?.scenario ?? "No correlated fault record",
+              },
+            ]}
+          />
+          <pre><code>{`failed = self._fault_affects(route, fault)
+gray = bool(fault and fault["kind"] == "gray_failure")
+if gray:
+    time.sleep(0.35)
+    failed = random.random() < 0.025
+status = (
+    HTTPStatus.INTERNAL_SERVER_ERROR if failed and gray
+    else HTTPStatus.SERVICE_UNAVAILABLE if failed
+    else HTTPStatus.OK
+)`}</code></pre>
+          <p className="microcopy">
+            This project code deliberately injects the LAB fault; it is not evidence of a bug in a real application endpoint. For these scenarios, clear the fault or use Reset to all green, then verify health and readback. The console can show real production source code only after a source repository is connected; it cannot safely invent a patch for code it cannot inspect.
+          </p>
+        </Panel>
         <Panel
           title="Durable action, readback, and outcome"
           kicker="Mutation is not success"
@@ -361,9 +553,18 @@ export function LiveIncidents({
                 <strong>
                   {data.recovery
                     ? `${data.recovery.current_stage} · ${data.recovery.status}`
-                    : "Not started"}
+                    : instanceRecoveryComplete
+                      ? "Probe gate passed · baseline restored"
+                      : data.action?.kind === "INSTANCE_QUARANTINE"
+                        ? "Waiting for 3 healthy probes on every route"
+                        : "Not started"}
                 </strong>
               </div>
+              {data.recovery && (
+                <Link href={`/app/reintegration?run=${data.recovery.id}`}>
+                  Open staged recovery details <ExternalLink size={13} />
+                </Link>
+              )}
               <Link href={`/app/actions?action=${data.action.id}`}>
                 Open attempts and exact readback <ExternalLink size={13} />
               </Link>
@@ -386,8 +587,12 @@ export function LiveIncidents({
     <div className="page-stack">
       <PageHeader
         eyebrow="Incidents"
-        title="Durable incident history"
-        brief="Every item is generated from a bounded real evidence window. Open a row to inspect the controller’s exact reasoning and non-selected hypotheses."
+        title="Incident history"
+        brief={
+          activeCount
+            ? `${activeCount} active incident${activeCount === 1 ? "" : "s"} require attention. Resolved incidents remain below as history.`
+            : "No active incidents. Resolved incidents remain below as history; open one to inspect its decision and evidence."
+        }
       />
       <section className="panel table-panel">
         <div className="table-scroll">
@@ -396,6 +601,7 @@ export function LiveIncidents({
               <tr>
                 <th>Status</th>
                 <th>Classification</th>
+                <th>Target endpoint</th>
                 <th>Summary</th>
                 <th>Opened</th>
                 <th>Trace</th>
@@ -411,6 +617,12 @@ export function LiveIncidents({
                   </td>
                   <td>
                     <code>{item.classification}</code>
+                  </td>
+                  <td>
+                    <code>
+                      {item.target.route ? `GET /${item.target.route}` : "all routes"}
+                      {item.target.instance ? ` × ${item.target.instance}` : " × all instances"}
+                    </code>
                   </td>
                   <td>
                     <strong>{item.summary}</strong>
