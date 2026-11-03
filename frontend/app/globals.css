@@ -7012,6 +7012,16 @@ kbd {
 
 .evidence-supports { border-top: 3px solid var(--accent-copper); }
 .safety-permitted { border-top: 3px solid var(--verified); }
+.evidence-revision-history { border-top: 1px solid var(--border-subtle); margin-top: 14px; padding-top: 12px; }
+.evidence-revision-history h3 { font-size: 13px; margin: 0; }
+.evidence-revision-history > p { color: var(--text-secondary); font-size: 10px; line-height: 1.5; margin: 5px 0 10px; }
+.evidence-revision-history ol { display: grid; gap: 8px; list-style: none; margin: 0; padding: 0; }
+.evidence-revision-history li { background: var(--inset); border-radius: 4px; min-width: 0; padding: 9px; }
+.evidence-revision-heading { align-items: baseline; display: flex; flex-wrap: wrap; gap: 4px 10px; justify-content: space-between; }
+.evidence-revision-heading strong { font-size: 11px; }
+.evidence-revision-heading span,
+.evidence-revision-history li > p { color: var(--text-muted); font-size: 10px; }
+.evidence-revision-history li > p { line-height: 1.5; margin: 5px 0 0; }
 
 details {
   margin-top: 12px;

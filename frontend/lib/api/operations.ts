@@ -177,6 +177,15 @@ export type DecisionTraceData = {
     completeness: number;
     evidence_support: Record<string, unknown>;
     competing_hypotheses: Array<Record<string, unknown>>;
+    evidence_window: null | {
+      window_id: string;
+      started_at: string;
+      ended_at: string;
+      completeness: number;
+      metrics: Record<string, unknown>;
+      probes: Record<string, unknown>;
+      conflicts: string[];
+    };
   }>;
   certificate: null | {
     id: string;

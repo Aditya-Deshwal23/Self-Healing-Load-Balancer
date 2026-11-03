@@ -237,7 +237,7 @@ export function LiveRouteMatrix({ compact = false }: { compact?: boolean }) {
       </div>
       {!compact && (
         <div className="notice info">
-          HTTP 5xx counts are shown per route/backend over the current evidence window. Above 10% opens a marked degraded incident; automatic drain requires at least 50% errors, 6 samples, a failed direct probe, healthy comparison peers, and safe remaining capacity.
+          HTTP 5xx counts are shown per route/backend over the current evidence window. A degraded incident needs at least 6 real samples, 2 errors, and an error rate above 10%; automatic drain needs at least 50% errors, a failed direct probe, healthy comparison peers, and safe remaining capacity.
         </div>
       )}
       <div className="matrix-scroll">

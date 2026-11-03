@@ -25,7 +25,7 @@ fresh live check before closure.
 | 12 | Observed | One recovery record showed retry count 3 against a configured maximum of 2. | Bounded retry policy exists; the inconsistent persisted run must be reviewed rather than silently advanced. | Open data/state inconsistency in the last observed record. |
 | 13 | Observed | Recovery probes passed, but the 5% canary stage failed and moved the run to review. | Keep traffic from advancing when request evidence fails even if probes pass; inspect the canary samples before retrying. | Fail-closed behavior worked; recovery remains unresolved. |
 | 14 | Observed | The failed 5% stage recorded 25 samples and a 68% error rate shortly after the injected fault expired. | Compared stage and fault timestamps with policy timing. A 12-second observation window and 3-second cooldown may allow tail failures into the canary window. | Likely timing interaction, not yet proven; tune/verify before retry. |
-| 15 | Observed | The user expected a separate HAProxy website/admin page for proof. | HAProxy stats/runtime are intentionally private; inspect routed traffic and HAProxy-confirmed state via the console and internal diagnostics. | Intentional boundary, not a missing public page. |
+| 15 | Observed | The user expected a separate HAProxy website/admin page for proof. | The Overview links to HAProxy stats only when opened from a loopback URL; on a remote dashboard it explains that stats are host-local. HAProxy stats/runtime stay private. | A remote console still cannot use the local link; use an approved authenticated management path if remote stats access is needed. |
 | 16 | Observed | The user reported Docker demo backends 1, 2, and 3 showing errors. | Preserve this as a reported symptom and inspect per-container health/logs before attributing a cause; no verified root cause was established in the last review. | Unconfirmed/open. |
 | 17 | Observed | Historical payload records included both applied and failed/pending outcomes, which made the catalog look unreliable. | Use persisted `status`, `applied_at`, `cleared_at`, and ground-truth ID as the request record; schema acceptance alone is not proof of backend application. | Partially explained; historical failures still need per-record reconciliation. |
 
@@ -100,21 +100,32 @@ latency, and a stable failure fingerprint. It exposes bounded-cardinality
 Prometheus counters by route, instance, and status code; request IDs are kept in
 structured backend logs rather than Prometheus labels.
 
-The worker evaluates a rolling 12-second evidence window. A route/backend is
-drained only when its 5xx rate reaches at least 50% with at least six real
-samples, its direct application probe fails, its peers and sibling routes are
-healthy, and the capacity/queue safety check passes. A single 500 is recorded
-and visible in Traffic, but does not eject a server by itself.
+The worker evaluates a rolling 12-second evidence window every half-second.
+Those repeated snapshots overlap, so the controller now requires the same
+incident class and scope in two consecutive, non-overlapping windows before it
+records a scoped incident or considers a routing action. This applies to
+degraded warnings and stronger route, shared-route, and instance failure
+classes. A direct `UNKNOWN_CONFLICT` remains visible immediately for manual
+review, but never authorizes a routing mutation. Non-action incidents also
+need two consecutive, non-overlapping healthy windows before they are closed,
+which prevents a short healthy blip from hiding a continuing fault.
 
-Sustained 5xx above the 10% healthy bound, or a failed endpoint probe with at
-least three samples, opens a non-actuating `ROUTE_INSTANCE_DEGRADED` incident.
-Its Decision Trace records why evidence is not yet sufficient to drain traffic.
-When the stronger isolated-failure conditions are met, the controller opens a
-`ROUTE_INSTANCE_FAILURE`, drains only that route/backend, confirms HAProxy
-readback, verifies affected and preserved traffic, then starts probe-gated
-staged reintegration after the fault clears. Shared-route failures do not cause
-mass ejection.
+Sustained 5xx above the 10% healthy bound needs at least six real samples and
+two errors in each window before it can support a non-actuating
+`ROUTE_INSTANCE_DEGRADED` incident. A failed direct probe can also support a
+warning after six request samples, but it must fail in both independent
+windows. Decision Trace retains the opening evidence and links every later
+classification revision to its own saved window. Strong isolated failure still
+needs at least 50% errors, six target samples, a failed target probe, healthy
+same-route peers, healthy sibling routes, and a passing capacity/queue check.
+Only then can the controller drain that route/backend, confirm HAProxy
+readback, verify affected and preserved traffic, and start probe-gated staged
+reintegration after the fault clears. Shared-route failures do not cause mass
+ejection.
 
 Gray-failure LAB scenarios are intentionally low-rate (2.5%) and observe-only;
 their individual 500s are counted and logged, but do not meet the sustained
-degradation or quarantine thresholds by themselves.
+degradation or quarantine thresholds by themselves. The HAProxy stats shortcut
+is usable from the control host’s loopback dashboard only; it is disabled on a
+remote dashboard because that browser's `localhost` would point at the user's
+own machine.

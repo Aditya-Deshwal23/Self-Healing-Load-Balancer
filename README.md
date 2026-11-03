@@ -107,11 +107,11 @@ traffic + probes + HAProxy Runtime readback
 
 Network boundaries are intentional:
 
-- `edge-nginx` is the only service with published ports;
+- `edge-nginx` is the only service with ports reachable beyond the local host; HAProxy stats is separately bound to host loopback for local read-only inspection;
 - `control-api` joins `api_edge_net` and `control_data_net`, but has no data-plane, observability, backend, or Runtime access;
 - NGINX alone bridges `api_edge_net` to `data_edge_net`; containers on those networks cannot route through it;
 - `control-worker` alone joins the private backend/observability networks and mounts the Runtime socket;
-- Prometheus, PostgreSQL, Redis, HAProxy stats, the Runtime socket and backend management/fault paths are not published;
+- Prometheus, PostgreSQL, Redis, the Runtime socket and backend management/fault paths are not published; HAProxy stats is available only at `127.0.0.1:8404` on the control host;
 - the structural HAProxy Data Plane API is not started in this Runtime-only prototype;
 - PostgreSQL is durable truth; Redis is coordination, session and event-stream infrastructure only;
 - a PostgreSQL advisory lock and a bounded Redis lease prevent two workers from holding write authority;

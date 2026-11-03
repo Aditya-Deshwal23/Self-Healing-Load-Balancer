@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import {
   AlertTriangle,
@@ -40,9 +41,14 @@ function time(value: string | null | undefined) {
 }
 
 export function LiveCommandCenter() {
+  const [statsAccessIsLocal, setStatsAccessIsLocal] = useState<boolean | null>(null);
   const control = useControlPlane();
   const summary = useOperationalSummary();
   const resetLab = useResetLab();
+  useEffect(() => {
+    const hostname = window.location.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+    setStatsAccessIsLocal(["localhost", "127.0.0.1", "::1"].includes(hostname));
+  }, []);
   const activeIncident = summary.data?.active_incidents[0];
   const trace = useDecisionTrace(activeIncident?.id);
 
@@ -112,6 +118,29 @@ export function LiveCommandCenter() {
         }
         actions={
           <>
+            {statsAccessIsLocal ? (
+              <a
+                className="button secondary"
+                href="http://127.0.0.1:8404/stats"
+                target="_blank"
+                rel="noreferrer"
+                title="Open HAProxy live statistics on this host."
+              >
+                HAProxy stats
+                <ArrowRight size={15} />
+              </a>
+            ) : (
+              <button
+                className="button secondary"
+                type="button"
+                disabled
+                title={statsAccessIsLocal === null
+                  ? "Checking whether this browser is on the control host."
+                  : "HAProxy stats are bound to 127.0.0.1 on the control host. Open this dashboard on that host to use the link."}
+              >
+                {statsAccessIsLocal === null ? "Checking HAProxy stats…" : "HAProxy stats · host-local"}
+              </button>
+            )}
             {data.environment.kind === "LAB" && (
               <button
                 className="button secondary"

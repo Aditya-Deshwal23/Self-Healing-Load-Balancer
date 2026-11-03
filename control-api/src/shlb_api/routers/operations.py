@@ -279,6 +279,12 @@ def incident_detail(incident_id: uuid.UUID, request: Request, auth: AuthContext 
 def decision_trace(incident_id: uuid.UUID, request: Request, auth: AuthContext = Depends(get_auth_context), db: Session = Depends(get_db)):
     incident = _authorized_incident(db, auth, incident_id)
     classifications = db.scalars(select(Classification).where(Classification.incident_id == incident.id).order_by(Classification.revision)).all()
+    evidence_windows = db.scalars(
+        select(ObservationWindow).where(
+            ObservationWindow.id.in_([row.observation_window_id for row in classifications])
+        )
+    ).all() if classifications else []
+    windows_by_id = {row.id: row for row in evidence_windows}
     fingerprint = db.scalar(select(Fingerprint).where(Fingerprint.incident_id == incident.id).order_by(Fingerprint.created_at.desc()).limit(1))
     certificate = db.scalar(select(EvidenceCertificate).where(EvidenceCertificate.incident_id == incident.id).order_by(EvidenceCertificate.created_at.desc()).limit(1))
     window = db.get(ObservationWindow, certificate.observation_window_id) if certificate else None
@@ -303,7 +309,24 @@ def decision_trace(incident_id: uuid.UUID, request: Request, auth: AuthContext =
         "evidence": {"window_id": str(window.id), "started_at": isoformat(window.started_at), "ended_at": isoformat(window.ended_at), "completeness": window.completeness, "metrics": window.metrics, "probes": window.probes, "conflicts": window.conflicts} if window else None,
         "lab_fault": {"id": str(lab_fault.id), "scenario": lab_fault.scenario, "scenario_kind": lab_fault.scenario_kind, "target": {"route": lab_fault.target_route, "instance": lab_fault.target_instance}, "duration_seconds": lab_fault.duration_seconds, "status": lab_fault.status, "ground_truth_id": lab_fault.ground_truth_id, "applied_at": isoformat(lab_fault.applied_at) if lab_fault.applied_at else None, "expires_at": isoformat(lab_fault.expires_at), "cleared_at": isoformat(lab_fault.cleared_at) if lab_fault.cleared_at else None} if lab_fault else None,
         "fingerprint": {"id": str(fingerprint.id), "schema_version": fingerprint.schema_version, "hash": fingerprint.fingerprint_hash, "canonical": fingerprint.canonical_value} if fingerprint else None,
-        "classifications": [{"id": str(row.id), "revision": row.revision, "final_class": row.final_class, "confidence": row.confidence, "completeness": row.completeness, "evidence_support": row.evidence_support, "competing_hypotheses": row.competing_hypotheses} for row in classifications],
+        "classifications": [{
+            "id": str(row.id),
+            "revision": row.revision,
+            "final_class": row.final_class,
+            "confidence": row.confidence,
+            "completeness": row.completeness,
+            "evidence_support": row.evidence_support,
+            "competing_hypotheses": row.competing_hypotheses,
+            "evidence_window": {
+                "window_id": str(evidence_window.id),
+                "started_at": isoformat(evidence_window.started_at),
+                "ended_at": isoformat(evidence_window.ended_at),
+                "completeness": evidence_window.completeness,
+                "metrics": evidence_window.metrics,
+                "probes": evidence_window.probes,
+                "conflicts": evidence_window.conflicts,
+            } if (evidence_window := windows_by_id.get(row.observation_window_id)) else None,
+        } for row in classifications],
         "certificate": {"id": str(certificate.id), "hash": certificate.certificate_hash, "scope_evidence": certificate.scope_evidence, "safety_inputs": certificate.safety_inputs, "candidate_actions": certificate.candidate_actions} if certificate else None,
         "action": _action_data(action, attempts) if action else None,
         "verification": {"result": verification.result, "affected": verification.affected_obligation, "preservation": verification.preservation_obligation, "sample_count": verification.sample_count, "completed_at": isoformat(verification.completed_at) if verification.completed_at else None} if verification else None,

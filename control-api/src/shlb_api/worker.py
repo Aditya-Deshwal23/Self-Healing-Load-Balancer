@@ -285,17 +285,111 @@ class ControlWorker:
             decision = classify(evidence, probes, conflicts, statistical_support=fast_recommendations, routes=self.routes, instances=self.instances)
             if decision.final_class == "HEALTHY":
                 if active_fault is None:
-                    self._resolve_non_action_incidents(db)
+                    if self._incident_signal_confirmed(db, window, decision):
+                        self._resolve_non_action_incidents(db)
                 return
             if decision.final_class == "UNKNOWN" and active_fault is None:
                 return
-            if decision.final_class == "UNKNOWN" and active_fault and active_fault.scenario != "UNKNOWN_CONFLICT" and active_fault.applied_at and (utc_now() - active_fault.applied_at).total_seconds() < 20:
+            if decision.final_class == "UNKNOWN" and active_fault and active_fault.scenario != "UNKNOWN_CONFLICT":
+                target_routes = [active_fault.target_route] if active_fault.target_route else list(self.routes)
+                target_instances = (
+                    list(self.instances)
+                    if active_fault.target_instance in (None, "all")
+                    else [active_fault.target_instance]
+                )
+                target_sample_counts = [
+                    evidence.get(f"{route}/{instance}", {}).get("samples", 0)
+                    for route in target_routes
+                    for instance in target_instances
+                ]
+                if not target_sample_counts or min(target_sample_counts) < LAB_POLICY.degraded_minimum_samples:
+                    return
+            needs_independent_confirmation = decision.final_class in {
+                "ROUTE_INSTANCE_DEGRADED",
+                "ROUTE_INSTANCE_FAILURE",
+                "SHARED_ROUTE_FAILURE",
+                "INSTANCE_DOWN",
+            } or (
+                decision.final_class == "UNKNOWN"
+                and active_fault is not None
+                and active_fault.scenario != "UNKNOWN_CONFLICT"
+            )
+            if needs_independent_confirmation and not self._incident_signal_confirmed(db, window, decision):
                 return
             incident, certificate = self._persist_decision(db, window, decision)
             if decision.final_class == "ROUTE_INSTANCE_FAILURE" and decision.actionable:
                 self._prepare_and_apply_route_action(db, incident, certificate, memberships)
             elif decision.final_class == "INSTANCE_DOWN" and decision.actionable:
                 self._prepare_and_apply_instance_action(db, incident, certificate, memberships)
+
+    def _incident_signal_confirmed(
+        self,
+        db: Session,
+        window: ObservationWindow,
+        decision: RuleDecision,
+    ) -> bool:
+        """Confirm an incident class in consecutive, independent windows."""
+        cursor = window
+        prior_windows: list[tuple[ObservationWindow, RuleDecision]] = []
+        for _ in range(max(0, LAB_POLICY.incident_confirmation_windows - 1)):
+            prior = db.scalar(
+                select(ObservationWindow)
+                .where(
+                    ObservationWindow.environment_id == window.environment_id,
+                    ObservationWindow.ended_at <= cursor.started_at,
+                )
+                .order_by(ObservationWindow.ended_at.desc())
+                .limit(1)
+            )
+            if prior is None:
+                return False
+            gap = cursor.started_at - prior.ended_at
+            if gap < timedelta(0) or gap > timedelta(seconds=LAB_POLICY.loop_seconds * 2):
+                return False
+            prior_decision = classify(
+                prior.metrics.get("memberships", {}),
+                prior.probes,
+                prior.conflicts,
+                routes=self.routes,
+                instances=self.instances,
+            )
+            if (
+                prior_decision.final_class != decision.final_class
+                or prior_decision.route != decision.route
+                or prior_decision.instance != decision.instance
+                or (
+                    decision.final_class == "UNKNOWN"
+                    and prior_decision.support.get("reason") != decision.support.get("reason")
+                )
+            ):
+                return False
+            prior_windows.append((prior, prior_decision))
+            cursor = prior
+        decision.support["confirmation"] = {
+            "required_windows": LAB_POLICY.incident_confirmation_windows,
+            "windows": [
+                {
+                    "window_id": str(prior.id),
+                    "started_at": prior.started_at.isoformat(),
+                    "ended_at": prior.ended_at.isoformat(),
+                    "final_class": prior_decision.final_class,
+                    "route": prior_decision.route,
+                    "instance": prior_decision.instance,
+                    "metrics": prior.metrics,
+                    "probes": prior.probes,
+                    "conflicts": prior.conflicts,
+                }
+                for prior, prior_decision in reversed(prior_windows)
+            ] + [{
+                "window_id": str(window.id),
+                "started_at": window.started_at.isoformat(),
+                "ended_at": window.ended_at.isoformat(),
+                "final_class": decision.final_class,
+                "route": decision.route,
+                "instance": decision.instance,
+            }],
+        }
+        return True
 
     def _load_topology(self) -> tuple[tuple[str, ...], tuple[str, ...]]:
         with self.sessions() as db:
@@ -667,11 +761,25 @@ class ControlWorker:
         canonical = f"class={decision.final_class}|route={decision.route or '-'}|instance={decision.instance or '-'}|schema=fingerprint-v1"
         fingerprint_hash = hashlib.sha256(canonical.encode()).hexdigest()
         incident = db.scalar(select(Incident).where(Incident.environment_id == IDS["environment"], Incident.fingerprint_hash == fingerprint_hash, Incident.status.in_(ACTIVE_INCIDENTS)).order_by(Incident.opened_at.desc()).limit(1))
-        if incident:
-            certificate = db.scalar(select(EvidenceCertificate).where(EvidenceCertificate.incident_id == incident.id).order_by(EvidenceCertificate.created_at.desc()).limit(1))
-            if certificate is None:
-                raise RuntimeError("active incident is missing its evidence certificate")
-            return incident, certificate
+        route_instance_classes = {"ROUTE_INSTANCE_DEGRADED", "ROUTE_INSTANCE_FAILURE"}
+        if (
+            incident is None
+            and decision.final_class in route_instance_classes
+            and route_id is not None
+            and instance_id is not None
+        ):
+            incident = db.scalar(
+                select(Incident)
+                .where(
+                    Incident.environment_id == IDS["environment"],
+                    Incident.route_id == route_id,
+                    Incident.instance_id == instance_id,
+                    Incident.operational_class.in_(route_instance_classes),
+                    Incident.status.in_(ACTIVE_INCIDENTS),
+                )
+                .order_by(Incident.opened_at.desc())
+                .limit(1)
+            )
         now = utc_now()
         summary_map = {
             "ROUTE_INSTANCE_FAILURE": f"{decision.route} fails only on {decision.instance} while peers and sibling routes remain healthy.",
@@ -680,13 +788,46 @@ class ControlWorker:
             "INSTANCE_DOWN": f"All registered routes on {decision.instance} fail direct application probes.",
             "UNKNOWN": "Evidence is conflicting or incomplete; destructive action is prohibited.",
         }
-        incident = Incident(environment_id=IDS["environment"], route_id=route_id, instance_id=instance_id, status="NEEDS_REVIEW" if decision.final_class == "UNKNOWN" else "OPEN", severity="CRITICAL" if decision.final_class in {"INSTANCE_DOWN", "SHARED_ROUTE_FAILURE"} else "WARNING", operational_class=decision.final_class, fingerprint_hash=fingerprint_hash, summary=summary_map[decision.final_class], opened_at=now, last_observed_at=now)
-        db.add(incident)
-        db.flush()
+        is_new_incident = incident is None
+        if incident is None:
+            incident = Incident(environment_id=IDS["environment"], route_id=route_id, instance_id=instance_id, status="NEEDS_REVIEW" if decision.final_class == "UNKNOWN" else "OPEN", severity="CRITICAL" if decision.final_class in {"INSTANCE_DOWN", "SHARED_ROUTE_FAILURE"} else "WARNING", operational_class=decision.final_class, fingerprint_hash=fingerprint_hash, summary=summary_map[decision.final_class], opened_at=now, last_observed_at=now)
+            db.add(incident)
+            db.flush()
+            revision = 1
+        else:
+            certificate = db.scalar(
+                select(EvidenceCertificate)
+                .where(EvidenceCertificate.incident_id == incident.id)
+                .order_by(EvidenceCertificate.created_at.desc())
+                .limit(1)
+            )
+            if certificate is None:
+                raise RuntimeError("active incident is missing its evidence certificate")
+            latest_window = db.get(ObservationWindow, certificate.observation_window_id)
+            latest_classification = db.scalar(
+                select(Classification)
+                .where(Classification.incident_id == incident.id)
+                .order_by(Classification.revision.desc())
+                .limit(1)
+            )
+            if latest_window is None or latest_classification is None:
+                raise RuntimeError("active incident is missing its classification history")
+            if window.started_at < latest_window.ended_at:
+                return incident, certificate
+            revision = latest_classification.revision + 1
+            if incident.operational_class != decision.final_class:
+                incident.operational_class = decision.final_class
+                incident.route_id = route_id
+                incident.instance_id = instance_id
+                incident.summary = summary_map[decision.final_class]
+                incident.severity = "CRITICAL" if decision.final_class in {"INSTANCE_DOWN", "SHARED_ROUTE_FAILURE"} else "WARNING"
+                incident.fingerprint_hash = fingerprint_hash
+            incident.last_observed_at = now
+            incident.version += 1
         fingerprint = Fingerprint(incident_id=incident.id, schema_version="fingerprint-v1", canonical_value=canonical, fingerprint_hash=fingerprint_hash)
         db.add(fingerprint)
         db.flush()
-        classification = Classification(incident_id=incident.id, observation_window_id=window.id, revision=1, final_class=decision.final_class, confidence=decision.confidence, completeness=decision.completeness, evidence_support=decision.support, competing_hypotheses=decision.competing)
+        classification = Classification(incident_id=incident.id, observation_window_id=window.id, revision=revision, final_class=decision.final_class, confidence=decision.confidence, completeness=decision.completeness, evidence_support=decision.support, competing_hypotheses=decision.competing)
         db.add(classification)
         db.flush()
         safety = {"evaluated": False, "reason": "class is not actionable"}
@@ -728,7 +869,8 @@ class ControlWorker:
         certificate = EvidenceCertificate(incident_id=incident.id, observation_window_id=window.id, fingerprint_id=fingerprint.id, classification_id=classification.id, certificate_hash=canonical_hash(certificate_payload), scope_evidence=decision.support, safety_inputs=safety, candidate_actions=candidates)
         db.add(certificate)
         db.flush()
-        self._event(db, event_type="incident_detected", aggregate_type="incident", aggregate_id=incident.id, aggregate_version=incident.version, incident_id=incident.id, data={"classification": incident.operational_class, "summary": incident.summary})
+        if is_new_incident:
+            self._event(db, event_type="incident_detected", aggregate_type="incident", aggregate_id=incident.id, aggregate_version=incident.version, incident_id=incident.id, data={"classification": incident.operational_class, "summary": incident.summary})
         self._event(db, event_type="classification_completed", aggregate_type="classification", aggregate_id=classification.id, aggregate_version=classification.revision, incident_id=incident.id, data={"final_class": decision.final_class, "confidence": decision.confidence, "completeness": decision.completeness, "actionable": decision.actionable})
         self._commit_publish(db)
         return incident, certificate

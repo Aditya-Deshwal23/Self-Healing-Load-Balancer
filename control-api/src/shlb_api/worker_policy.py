@@ -17,6 +17,9 @@ class LabControlPolicy:
     heartbeat_stale_seconds: int = 10
     failure_rate: float = 0.5
     healthy_rate: float = 0.1
+    degraded_minimum_samples: int = 6
+    degraded_minimum_errors: int = 2
+    incident_confirmation_windows: int = 2
     harmful_error_rate: float = 0.25
     target_minimum_samples: int = 6
     control_minimum_samples: int = 3
@@ -172,12 +175,13 @@ def classify(
             target = _member(evidence, route, instance)
             target_probe = probes.get(f"{route}/{instance}", {})
             elevated_error_rate = (
-                target.get("samples", 0) >= CONTROL_MINIMUM_SAMPLES
+                target.get("samples", 0) >= LAB_POLICY.degraded_minimum_samples
+                and target.get("errors", 0) >= LAB_POLICY.degraded_minimum_errors
                 and target.get("error_rate") is not None
                 and target["error_rate"] > HEALTHY_RATE
             )
             probe_failure = (
-                target.get("samples", 0) >= CONTROL_MINIMUM_SAMPLES
+                target.get("samples", 0) >= LAB_POLICY.degraded_minimum_samples
                 and target_probe.get("application_ok") is False
             )
             if elevated_error_rate or probe_failure:

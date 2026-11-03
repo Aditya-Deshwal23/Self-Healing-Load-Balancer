@@ -114,7 +114,7 @@ export function LiveIncidents({
     const targetProbe = targetKey ? probeSnapshot?.[targetKey] : undefined;
     const classExplanation: Record<string, string> = {
       UNKNOWN: "The evidence is incomplete or conflicting. The controller retains the last confirmed routing state and cannot make a destructive change.",
-      ROUTE_INSTANCE_DEGRADED: "This route/backend pair has elevated 5xx responses or a failed direct probe, but the independent evidence does not prove that isolating this one membership is safe.",
+      ROUTE_INSTANCE_DEGRADED: "This route/backend pair showed elevated 5xx responses or a failed direct probe in separate evidence windows, but the evidence does not prove that isolating this one membership is safe.",
       ROUTE_INSTANCE_FAILURE: "Evidence isolates the failure to one route on one backend. The controller can consider changing that exact pool membership while checking that peers remain safe.",
       INSTANCE_DOWN: "Direct probes failed across every registered route on this physical instance. The controller scopes the response to this instance’s route memberships and checks capacity once.",
       SHARED_ROUTE_FAILURE: "The same route is failing across physical instances. The evidence does not support ejecting one backend as the cause, so broad removal is prohibited.",
@@ -279,7 +279,7 @@ export function LiveIncidents({
           </div>
           <details>
             <summary>How to read the thresholds and scope checks</summary>
-            <p>Request errors are counted per route × instance membership. Elevated errors above 10% create a warning. A route-only isolation decision needs at least 50% errors and 6 target samples, a failed target probe, healthy same-route peers, and healthy sibling routes on the same instance. Capacity and peer-queue checks run before any Runtime mutation. A physical instance shared by several pools is counted once for capacity, while each HAProxy membership remains independently changeable.</p>
+            <p>Request errors are counted per route × instance membership. A confirmed incident needs the same classification in two separate, non-overlapping evidence windows. Elevated errors above 10% need at least 6 requests and 2 errors in each window; a failed direct probe can also support a warning after 6 request samples. Non-action incidents close only after two separate healthy windows. A route-only isolation decision needs at least 50% errors and 6 target samples, a failed target probe, healthy same-route peers, and healthy sibling routes on the same instance. Capacity and peer-queue checks run before any Runtime mutation. A physical instance shared by several pools is counted once for capacity, while each HAProxy membership remains independently changeable.</p>
           </details>
         </section>
         <div className="trace-grid">
@@ -324,6 +324,63 @@ export function LiveIncidents({
                     })}
                   </pre>
                 </details>
+                <section className="evidence-revision-history" aria-label="Classification evidence history">
+                  <h3>Opening and later evidence</h3>
+                  <p>Each revision links to its own evidence window and includes the earlier independent window used to confirm it. Revision 1 is the opening record; later revisions show how the controller’s view changed over time.</p>
+                  <ol>
+                    {data.classifications.map((item) => {
+                      const evidenceWindow = item.evidence_window;
+                      const revisionMetrics = evidenceWindow?.metrics as {
+                        memberships?: Record<string, {
+                          samples?: number;
+                          errors?: number;
+                          error_rate?: number | null;
+                          p95_ms?: number | null;
+                        }>;
+                      } | undefined;
+                      const revisionProbes = evidenceWindow?.probes as Record<string, {
+                        reachable?: boolean;
+                        application_ok?: boolean;
+                        status?: number | null;
+                      }> | undefined;
+                      const revisionTarget = targetKey
+                        ? revisionMetrics?.memberships?.[targetKey]
+                        : undefined;
+                      const revisionProbe = targetKey
+                        ? revisionProbes?.[targetKey]
+                        : undefined;
+                      return (
+                        <li key={item.id}>
+                          <div className="evidence-revision-heading">
+                            <strong>Revision {item.revision} · {item.final_class.replaceAll("_", " ")}</strong>
+                            <span>{evidenceWindow ? `${new Date(evidenceWindow.started_at).toLocaleTimeString()}–${new Date(evidenceWindow.ended_at).toLocaleTimeString()}` : "Evidence window unavailable"}</span>
+                          </div>
+                          <p>
+                            {revisionTarget
+                              ? `${revisionTarget.errors ?? 0} errors in ${revisionTarget.samples ?? 0} requests · ${revisionTarget.error_rate == null ? "rate unavailable" : `${(revisionTarget.error_rate * 100).toFixed(1)}% 5xx`} · p95 ${revisionTarget.p95_ms?.toFixed(1) ?? "—"} ms`
+                              : "This classification covers a wider scope or has no single route × instance target."}
+                            {revisionProbe
+                              ? ` · probe ${revisionProbe.application_ok ? "passed" : "failed"}${revisionProbe.status ? ` (HTTP ${revisionProbe.status})` : ""}`
+                              : ""}
+                          </p>
+                          {evidenceWindow && (
+                            <details>
+                              <summary>Inspect revision {item.revision} details</summary>
+                              <pre>{formatJson({
+                                completeness: evidenceWindow.completeness,
+                                metrics: evidenceWindow.metrics,
+                                probes: evidenceWindow.probes,
+                                conflicts: evidenceWindow.conflicts,
+                                supports: item.evidence_support,
+                                rejected_scopes: item.competing_hypotheses,
+                              })}</pre>
+                            </details>
+                          )}
+                        </li>
+                      );
+                    })}
+                  </ol>
+                </section>
               </>
             ) : (
               <StateMessage state="unknown" title="No complete evidence window">
